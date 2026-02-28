@@ -1,0 +1,22 @@
+# Build artifacts
+build/
+__pycache__/
+dotnet/
+*.exe
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.sln
+
+# OS-specific
+Thumbs.db
+.DS_Store
+
+# Certificates
+*.crt
+*.key
+*.csr
