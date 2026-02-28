@@ -1,5 +1,6 @@
 # Build artifacts
 build/
+dist/
 __pycache__/
 dotnet/
 *.exe
