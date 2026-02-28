@@ -121,3 +121,12 @@ Step-by-step deployment guides for specific cloud providers:
 
 - [Google Cloud](install/Google%20Cloud.md)
 - [OVH Cloud](install/OVH%20Cloud.md)
+
+## Third-party dependencies
+
+| Library | License | Usage |
+|---------|---------|-------|
+| [google/go-tdx-guest](https://github.com/google/go-tdx-guest) | Apache 2.0 | TDX quote parsing and signature verification |
+| [golang-jwt/jwt](https://github.com/golang-jwt/jwt) | MIT | JWT token signing and validation |
+
+Full license texts are in [THIRD-PARTY-LICENSES](THIRD-PARTY-LICENSES).
