@@ -52,13 +52,15 @@ type SGXQuote struct {
 	Header     []byte // [0..48)
 	ReportBody []byte // [48..432)
 
-	ISVSignature   [64]byte  // ECDSA-P256 (r‖s, little-endian)
-	AttestationKey [64]byte  // raw P-256 (x‖y, little-endian)
+	ISVSignature   [64]byte  // ECDSA-P256 (r‖s)
+	AttestationKey [64]byte  // raw P-256 (x‖y)
 	QEReportBody   [384]byte // QE enclave report body
-	QESignature    [64]byte  // ECDSA-P256 (r‖s, little-endian)
+	QESignature    [64]byte  // ECDSA-P256 (r‖s)
 	QEAuthData     []byte
 	QECertType     uint16
 	QECertData     []byte // PEM cert chain when QECertType == 5
+
+	littleEndian bool // detected ECDSA byte order (set by VerifyISVSignature)
 }
 
 // ParseSGXQuote parses a raw SGX DCAP Quote v3 byte slice.
@@ -175,18 +177,23 @@ func (q *SGXQuote) VerifyAll() error {
 
 // VerifyISVSignature checks ECDSA-P256(Header ‖ ReportBody) against the
 // attestation key embedded in the quote.
+//
+// Intel DCAP quotes may store ECDSA coordinates in either big-endian or
+// little-endian byte order depending on the QE version. We auto-detect
+// by checking which byte order puts the attestation key on the P-256 curve.
 func (q *SGXQuote) VerifyISVSignature() error {
-	pubKey, err := ecdsaKeyFromLE(q.AttestationKey[:])
+	pubKey, littleEndian, err := ecdsaKeyAutoDetect(q.AttestationKey[:])
 	if err != nil {
 		return fmt.Errorf("invalid attestation key: %w", err)
 	}
+	q.littleEndian = littleEndian
 
 	msg := make([]byte, sgxHeaderSize+sgxReportBodySize)
 	copy(msg[:sgxHeaderSize], q.Header)
 	copy(msg[sgxHeaderSize:], q.ReportBody)
 	hash := sha256.Sum256(msg)
 
-	if !verifyECDSALE(pubKey, hash[:], q.ISVSignature[:]) {
+	if !verifyECDSA(pubKey, hash[:], q.ISVSignature[:], littleEndian) {
 		return fmt.Errorf("ECDSA signature does not match")
 	}
 	return nil
@@ -233,7 +240,7 @@ func (q *SGXQuote) VerifyQESignature() error {
 
 	hash := sha256.Sum256(q.QEReportBody[:])
 
-	if !verifyECDSALE(pckPub, hash[:], q.QESignature[:]) {
+	if !verifyECDSA(pckPub, hash[:], q.QESignature[:], q.littleEndian) {
 		return fmt.Errorf("ECDSA signature does not match")
 	}
 	return nil
@@ -300,30 +307,45 @@ func (q *SGXQuote) ISVSVN() uint16 {
 //  Helpers
 // ---------------------------------------------------------------------------
 
-// ecdsaKeyFromLE constructs a P-256 public key from 64 bytes (x‖y) in
-// little-endian byte order (Intel format).
-func ecdsaKeyFromLE(raw []byte) (*ecdsa.PublicKey, error) {
+// ecdsaKeyAutoDetect tries both big-endian and little-endian byte orders
+// for the (x‖y) coordinates and returns the key plus the detected order.
+// Intel's DCAP QE versions differ: classic IPP uses LE, newer versions use BE.
+func ecdsaKeyAutoDetect(raw []byte) (*ecdsa.PublicKey, bool, error) {
 	if len(raw) != 64 {
-		return nil, fmt.Errorf("expected 64 bytes, got %d", len(raw))
+		return nil, false, fmt.Errorf("expected 64 bytes, got %d", len(raw))
 	}
-	x := new(big.Int).SetBytes(reverseBytes(raw[:32]))
-	y := new(big.Int).SetBytes(reverseBytes(raw[32:64]))
 
-	pub := &ecdsa.PublicKey{Curve: elliptic.P256(), X: x, Y: y}
-	if !pub.Curve.IsOnCurve(pub.X, pub.Y) {
-		return nil, fmt.Errorf("point not on P-256 curve")
+	// Try big-endian first (standard EC / newer QE versions)
+	xBE := new(big.Int).SetBytes(raw[:32])
+	yBE := new(big.Int).SetBytes(raw[32:64])
+	if elliptic.P256().IsOnCurve(xBE, yBE) {
+		return &ecdsa.PublicKey{Curve: elliptic.P256(), X: xBE, Y: yBE}, false, nil
 	}
-	return pub, nil
+
+	// Try little-endian (Intel IPP / classic DCAP)
+	xLE := new(big.Int).SetBytes(reverseBytes(raw[:32]))
+	yLE := new(big.Int).SetBytes(reverseBytes(raw[32:64]))
+	if elliptic.P256().IsOnCurve(xLE, yLE) {
+		return &ecdsa.PublicKey{Curve: elliptic.P256(), X: xLE, Y: yLE}, true, nil
+	}
+
+	return nil, false, fmt.Errorf("point not on P-256 curve (tried both BE and LE)")
 }
 
-// verifyECDSALE verifies an ECDSA signature stored as r‖s (each 32 bytes,
-// little-endian) over the given hash.
-func verifyECDSALE(pub *ecdsa.PublicKey, hash, sig []byte) bool {
+// verifyECDSA verifies an ECDSA signature stored as r‖s (each 32 bytes).
+// If littleEndian is true, bytes are reversed before conversion to big.Int.
+func verifyECDSA(pub *ecdsa.PublicKey, hash, sig []byte, littleEndian bool) bool {
 	if len(sig) != 64 {
 		return false
 	}
-	r := new(big.Int).SetBytes(reverseBytes(sig[:32]))
-	s := new(big.Int).SetBytes(reverseBytes(sig[32:64]))
+	var r, s *big.Int
+	if littleEndian {
+		r = new(big.Int).SetBytes(reverseBytes(sig[:32]))
+		s = new(big.Int).SetBytes(reverseBytes(sig[32:64]))
+	} else {
+		r = new(big.Int).SetBytes(sig[:32])
+		s = new(big.Int).SetBytes(sig[32:64])
+	}
 	return ecdsa.Verify(pub, hash, r, s)
 }
 

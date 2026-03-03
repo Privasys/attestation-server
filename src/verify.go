@@ -141,8 +141,12 @@ func verifySGX(w http.ResponseWriter, quoteRaw []byte) {
 		return
 	}
 
-	log.Printf("SGX quote verified — MRENCLAVE=%x MRSIGNER=%x",
-		quote.MRENCLAVE(), quote.MRSIGNER())
+	byteOrder := "big-endian"
+	if quote.littleEndian {
+		byteOrder = "little-endian"
+	}
+	log.Printf("SGX quote verified (%s ECDSA) — MRENCLAVE=%x MRSIGNER=%x",
+		byteOrder, quote.MRENCLAVE(), quote.MRSIGNER())
 
 	sendJSON(w, 200, VerifyResponse{
 		Success: true,
