@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os"
-	"os/exec"
 
 	tdxAbi "github.com/google/go-tdx-guest/abi"
 	tdxCheck "github.com/google/go-tdx-guest/verify"
@@ -121,40 +119,35 @@ func verifyTDX(w http.ResponseWriter, quoteRaw []byte) {
 	})
 }
 
-// verifySGX uses the external 'check' binary to verify SGX v3 quotes.
+// verifySGX parses and cryptographically verifies an SGX DCAP Quote v3
+// entirely in Go: ECDSA signatures, attestation key binding, and cert chain.
 func verifySGX(w http.ResponseWriter, quoteRaw []byte) {
-	// Write raw quote to temporary file for the external tool.
-	tmpFile, err := os.CreateTemp("", "quote-*.dat")
+	quote, err := ParseSGXQuote(quoteRaw)
 	if err != nil {
-		sendJSON(w, 500, VerifyResponse{Success: false, Error: "Internal server error"})
-		return
-	}
-	defer os.Remove(tmpFile.Name())
-
-	if _, err := tmpFile.Write(quoteRaw); err != nil {
-		tmpFile.Close()
-		sendJSON(w, 500, VerifyResponse{Success: false, Error: "Failed to write quote"})
-		return
-	}
-	tmpFile.Close()
-
-	cmd := exec.Command("/home/bertrand/go-tdx/tools/check/check", "-in", tmpFile.Name())
-	output, err := cmd.CombinedOutput()
-
-	if err != nil {
-		log.Printf("SGX verification tool failed: %v, Output: %s", err, string(output))
 		sendJSON(w, 400, VerifyResponse{
 			Success: false,
-			Status:  "VERIFICATION_FAILED",
-			Error:   fmt.Sprintf("SGX verification failed: %s", string(output)),
+			Error:   fmt.Sprintf("Failed to parse SGX quote: %v", err),
 		})
 		return
 	}
 
+	if err := quote.VerifyAll(); err != nil {
+		log.Printf("SGX verification failed: %v", err)
+		sendJSON(w, 200, VerifyResponse{
+			Success: false,
+			Status:  "VERIFICATION_FAILED",
+			Error:   fmt.Sprintf("SGX quote verification failed: %v", err),
+		})
+		return
+	}
+
+	log.Printf("SGX quote verified — MRENCLAVE=%x MRSIGNER=%x",
+		quote.MRENCLAVE(), quote.MRSIGNER())
+
 	sendJSON(w, 200, VerifyResponse{
 		Success: true,
 		Status:  "OK",
-		Message: "SGX quote verified via DCAP",
+		Message: "SGX DCAP Quote v3 verified (signature + attestation key binding + certificate chain)",
 	})
 }
 
