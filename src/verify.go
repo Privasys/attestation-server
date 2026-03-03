@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -25,6 +26,12 @@ type VerifyRequest struct {
 type VerifyResponse struct {
 	Success     bool     `json:"success"`
 	Status      string   `json:"status,omitempty"`
+	TeeType     string   `json:"teeType,omitempty"`
+	MREnclave   string   `json:"mrenclave,omitempty"`
+	MRSigner    string   `json:"mrsigner,omitempty"`
+	MRTD        string   `json:"mrtd,omitempty"`
+	ISVProdID   *uint16  `json:"isvProdId,omitempty"`
+	ISVSVN      *uint16  `json:"isvSvn,omitempty"`
 	TcbDate     string   `json:"tcbDate,omitempty"`
 	AdvisoryIDs []string `json:"advisoryIds,omitempty"`
 	Message     string   `json:"message,omitempty"`
@@ -112,9 +119,17 @@ func verifyTDX(w http.ResponseWriter, quoteRaw []byte) {
 		return
 	}
 
+	// Extract MRTD from TDX report body (offset 184..232 in the raw quote)
+	var mrtd string
+	if len(quoteRaw) >= 232 {
+		mrtd = hex.EncodeToString(quoteRaw[184:232])
+	}
+
 	sendJSON(w, 200, VerifyResponse{
 		Success: true,
 		Status:  "OK",
+		TeeType: "tdx",
+		MRTD:    mrtd,
 		Message: "TDX quote verified (signature + certificate chain)",
 	})
 }
@@ -145,13 +160,21 @@ func verifySGX(w http.ResponseWriter, quoteRaw []byte) {
 	if quote.littleEndian {
 		byteOrder = "little-endian"
 	}
+	prodID := quote.ISVProdID()
+	svn := quote.ISVSVN()
+
 	log.Printf("SGX quote verified (%s ECDSA) — MRENCLAVE=%x MRSIGNER=%x",
 		byteOrder, quote.MRENCLAVE(), quote.MRSIGNER())
 
 	sendJSON(w, 200, VerifyResponse{
-		Success: true,
-		Status:  "OK",
-		Message: "SGX DCAP Quote v3 verified (signature + attestation key binding + certificate chain)",
+		Success:   true,
+		Status:    "OK",
+		TeeType:   "sgx",
+		MREnclave: hex.EncodeToString(quote.MRENCLAVE()),
+		MRSigner:  hex.EncodeToString(quote.MRSIGNER()),
+		ISVProdID: &prodID,
+		ISVSVN:    &svn,
+		Message:   "SGX DCAP Quote v3 verified (signature + attestation key binding + certificate chain)",
 	})
 }
 
