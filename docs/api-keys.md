@@ -63,7 +63,7 @@ Give the token string to the user.
 Requires a running server and an **admin-scoped** token.
 
 ```bash
-curl -X POST https://as.privasys.org/api/issue \
+curl -X POST https://as.privasys.org/issue \
   -H "Authorization: Bearer <ADMIN_TOKEN>" \
   -H "Content-Type: application/json" \
   -d '{"subject": "bob", "scope": "verify", "days_valid": 30}'

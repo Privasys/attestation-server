@@ -6,10 +6,10 @@ secured with Ed25519 JWT authentication.
 
 ## Endpoints
 
-| Method | Path            | Scope    | Description                          |
-|--------|-----------------|----------|--------------------------------------|
-| POST   | `/api/verify`   | verify   | Verify a hardware attestation quote  |
-| POST   | `/api/issue`    | admin    | Issue a new API key (JWT)            |
+| Method | Path       | Scope   | Description                          |
+|--------|------------|---------|--------------------------------------|
+| POST   | `/verify`  | verify  | Verify a hardware attestation quote  |
+| POST   | `/issue`   | admin   | Issue a new API key (JWT)            |
 
 ## Project structure
 
@@ -96,7 +96,7 @@ JWT_SIGNING_KEY_FILE=server-jwt.key ./dist/attestation-server issue \
 ## Verify a quote
 
 ```bash
-curl -X POST https://as.privasys.org/api/verify \
+curl -X POST https://as.privasys.org/verify \
   -H "Authorization: Bearer <TOKEN>" \
   -H "Content-Type: application/json" \
   -d '{"quote": "<base64-encoded-quote>"}'

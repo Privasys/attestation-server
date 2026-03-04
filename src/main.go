@@ -62,15 +62,15 @@ func main() {
 	}
 
 	// Protected: requires a valid JWT with "verify" scope
-	http.HandleFunc("/api/verify", requireAuth(verifyHandler, "verify"))
+	http.HandleFunc("/verify", requireAuth(verifyHandler, "verify"))
 
 	// Admin: requires a valid JWT with "admin" scope
-	http.HandleFunc("/api/issue", requireAuth(issueHandler, "admin"))
+	http.HandleFunc("/issue", requireAuth(issueHandler, "admin"))
 
 	fmt.Println("--- Privasys Attestation Server ---")
 	fmt.Println("Listening on :8080")
 	fmt.Println("Endpoints:")
-	fmt.Println("  POST /api/verify  (Bearer token, scope: verify)")
-	fmt.Println("  POST /api/issue   (Bearer token, scope: admin)")
+	fmt.Println("  POST /verify  (Bearer token, scope: verify)")
+	fmt.Println("  POST /issue   (Bearer token, scope: admin)")
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
