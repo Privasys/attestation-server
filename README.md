@@ -96,7 +96,7 @@ JWT_SIGNING_KEY_FILE=server-jwt.key ./dist/attestation-server issue \
 ## Verify a quote
 
 ```bash
-curl -X POST https://gcp-lon-1.dcap.privasys.org/api/verify \
+curl -X POST https://as.privasys.org/api/verify \
   -H "Authorization: Bearer <TOKEN>" \
   -H "Content-Type: application/json" \
   -d '{"quote": "<base64-encoded-quote>"}'

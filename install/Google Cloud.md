@@ -155,7 +155,7 @@ sudo apt update && sudo apt install caddy
 Edit `/etc/caddy/Caddyfile`:
 
 ```caddyfile
-gcp-lon-1.dcap.privasys.org {
+as.privasys.org {
     reverse_proxy /api/* localhost:8080
 
     log {
@@ -173,7 +173,7 @@ Caddy will automatically obtain a Let's Encrypt certificate for the domain.
 ## 10. Test
 
 ```bash
-curl -X POST https://gcp-lon-1.dcap.privasys.org/api/verify \
+curl -X POST https://as.privasys.org/api/verify \
   -H "Authorization: Bearer <TOKEN>" \
   -H "Content-Type: application/json" \
   -d '{"quote": "<base64-encoded-quote>"}'

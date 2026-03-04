@@ -1,4 +1,4 @@
-module github.com/privasys/dcap-server
+module github.com/privasys/attestation-server
 
 go 1.22
 
