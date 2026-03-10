@@ -95,16 +95,7 @@ cd ~/attestation-server
 go build -o dist/attestation-server ./src/
 ```
 
-## 6. Generate the JWT signing key
-
-```bash
-openssl genpkey -algorithm Ed25519 -out ~/attestation-server/server-jwt.key
-openssl pkey -in ~/attestation-server/server-jwt.key -pubout \
-  -out ~/attestation-server/server-jwt.pub
-chmod 600 ~/attestation-server/server-jwt.key
-```
-
-## 7. Create the systemd service
+## 6. Create the systemd service
 
 Create `/etc/systemd/system/attestation-server.service`:
 
@@ -116,7 +107,7 @@ After=network.target pccs.service
 [Service]
 Type=simple
 WorkingDirectory=/home/bertrand/attestation-server
-Environment=JWT_SIGNING_KEY_FILE=/home/bertrand/attestation-server/server-jwt.key
+Environment=OIDC_ISSUER=https://auth.example.com
 ExecStart=/home/bertrand/attestation-server/dist/attestation-server
 Restart=on-failure
 RestartSec=5
@@ -125,23 +116,17 @@ RestartSec=5
 WantedBy=multi-user.target
 ```
 
+Replace `https://auth.example.com` with your OIDC provider URL.
+
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl enable --now attestation-server
 sudo systemctl status attestation-server
 ```
 
-## 8. Issue an API key
+See [docs/authentication.md](../docs/authentication.md) for the full OIDC setup guide.
 
-```bash
-JWT_SIGNING_KEY_FILE=~/attestation-server/server-jwt.key \
-  ~/attestation-server/dist/attestation-server issue \
-  --subject "acme-corp" --scope "verify" --days 90
-```
-
-See [docs/api-keys.md](../docs/api-keys.md) for the full token management guide.
-
-## 9. Set up Caddy as a reverse proxy
+## 7. Set up Caddy as a reverse proxy
 
 ```bash
 sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https
@@ -156,7 +141,7 @@ Edit `/etc/caddy/Caddyfile`:
 
 ```caddyfile
 as.privasys.org {
-    reverse_proxy /api/* localhost:8080
+    reverse_proxy /* localhost:8080
 
     log {
         output file /var/log/caddy/access.log
@@ -170,11 +155,11 @@ sudo systemctl restart caddy
 
 Caddy will automatically obtain a Let's Encrypt certificate for the domain.
 
-## 10. Test
+## 8. Test
 
 ```bash
-curl -X POST https://as.privasys.org/api/verify \
-  -H "Authorization: Bearer <TOKEN>" \
+curl -X POST https://as.privasys.org/ \
+  -H "Authorization: Bearer <OIDC_TOKEN>" \
   -H "Content-Type: application/json" \
   -d '{"quote": "<base64-encoded-quote>"}'
 ```

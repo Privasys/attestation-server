@@ -1,76 +1,62 @@
 package main
 
 import (
-	"crypto/ed25519"
-	"crypto/x509"
-	"encoding/pem"
+	"flag"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 )
 
-// ---------------------------------------------------------------------------
-//  Configuration  (override via environment variables)
-// ---------------------------------------------------------------------------
-
-// JWT_SIGNING_KEY_FILE must point to a PEM-encoded Ed25519 private key.
-// The corresponding public key is derived automatically.
-//
-//	Generate with:
-//	  openssl genpkey -algorithm Ed25519 -out server-jwt.key
-//	  openssl pkey -in server-jwt.key -pubout -out server-jwt.pub
-var (
-	signingKey   ed25519.PrivateKey
-	verifyingKey ed25519.PublicKey
-)
-
-func loadSigningKey() {
-	keyFile := os.Getenv("JWT_SIGNING_KEY_FILE")
-	if keyFile == "" {
-		log.Fatal("JWT_SIGNING_KEY_FILE environment variable is required")
-	}
-	pemBytes, err := os.ReadFile(keyFile)
-	if err != nil {
-		log.Fatalf("Failed to read signing key %s: %v", keyFile, err)
-	}
-	block, _ := pem.Decode(pemBytes)
-	if block == nil {
-		log.Fatalf("No PEM block found in %s", keyFile)
-	}
-	parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
-	if err != nil {
-		log.Fatalf("Failed to parse Ed25519 private key: %v", err)
-	}
-	priv, ok := parsed.(ed25519.PrivateKey)
-	if !ok {
-		log.Fatalf("Key in %s is not an Ed25519 private key", keyFile)
-	}
-	signingKey = priv
-	verifyingKey = priv.Public().(ed25519.PublicKey)
-	log.Printf("Loaded Ed25519 signing key from %s", keyFile)
-}
-
 func main() {
-	loadSigningKey()
+	fs := flag.NewFlagSet("attestation-server", flag.ExitOnError)
 
-	// CLI: issue a key directly via command-line flags
-	// Usage: JWT_SIGNING_KEY_FILE=server-jwt.key attestation-server issue --subject "acme" --days 90
-	if len(os.Args) >= 2 && os.Args[1] == "issue" {
-		cliIssue()
-		return
+	oidcIssuer := fs.String("oidc-issuer", envOrDefault("OIDC_ISSUER", ""),
+		"OIDC issuer URL for bearer token verification (required, env: OIDC_ISSUER)")
+	oidcAudience := fs.String("oidc-audience", envOrDefault("OIDC_AUDIENCE", "attestation-server"),
+		"Expected OIDC audience claim (env: OIDC_AUDIENCE)")
+	oidcClientRole := fs.String("oidc-client-role", envOrDefault("OIDC_CLIENT_ROLE", "attestation-server:client"),
+		"OIDC role required for verification requests (env: OIDC_CLIENT_ROLE)")
+	oidcRoleClaim := fs.String("oidc-role-claim", envOrDefault("OIDC_ROLE_CLAIM", "urn:zitadel:iam:org:project:roles"),
+		"JWT claim key containing roles (env: OIDC_ROLE_CLAIM)")
+	listen := fs.String("listen", envOrDefault("LISTEN_ADDR", ":8080"),
+		"Listen address (env: LISTEN_ADDR)")
+
+	if err := fs.Parse(os.Args[1:]); err != nil {
+		log.Fatal(err)
 	}
 
-	// Protected: requires a valid JWT with "verify" scope
-	http.HandleFunc("/verify", requireAuth(verifyHandler, "verify"))
+	if *oidcIssuer == "" {
+		fmt.Fprintln(os.Stderr, "error: --oidc-issuer (or OIDC_ISSUER env) is required")
+		fs.PrintDefaults()
+		os.Exit(1)
+	}
 
-	// Admin: requires a valid JWT with "admin" scope
-	http.HandleFunc("/issue", requireAuth(issueHandler, "admin"))
+	verifier, err := NewOIDCVerifier(&OIDCConfig{
+		Issuer:     *oidcIssuer,
+		Audience:   *oidcAudience,
+		ClientRole: *oidcClientRole,
+		RoleClaim:  *oidcRoleClaim,
+	})
+	if err != nil {
+		log.Fatalf("Failed to create OIDC verifier: %v", err)
+	}
+
+	http.HandleFunc("/", requireAuth(verifyHandler, verifier))
 
 	fmt.Println("--- Privasys Attestation Server ---")
-	fmt.Println("Listening on :8080")
-	fmt.Println("Endpoints:")
-	fmt.Println("  POST /verify  (Bearer token, scope: verify)")
-	fmt.Println("  POST /issue   (Bearer token, scope: admin)")
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	fmt.Printf("OIDC issuer : %s\n", *oidcIssuer)
+	fmt.Printf("OIDC audience: %s\n", *oidcAudience)
+	fmt.Printf("Client role  : %s\n", *oidcClientRole)
+	fmt.Printf("Listening on %s\n", *listen)
+	fmt.Println("Endpoint:")
+	fmt.Println("  POST /  (Bearer token, role: attestation-server:client)")
+	log.Fatal(http.ListenAndServe(*listen, nil))
+}
+
+func envOrDefault(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }

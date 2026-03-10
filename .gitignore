@@ -21,3 +21,6 @@ Thumbs.db
 *.crt
 *.key
 *.csr
+
+# Internal status
+status.md
