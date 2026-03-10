@@ -14,7 +14,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-//  DCAP verification
+//  Quote verification
 // ---------------------------------------------------------------------------
 
 // VerifyRequest is the expected JSON body for POST /api/verify.

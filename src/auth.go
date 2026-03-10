@@ -227,6 +227,21 @@ func checkRole(claims map[string]interface{}, role, roleClaim string) bool {
 			}
 		}
 	}
+
+	// 4. Zitadel project-specific role claims (urn:zitadel:iam:org:project:{id}:roles).
+	// When the "projects:roles" scope is used, Zitadel emits per-project claims
+	// with the project ID embedded in the claim key.
+	for key, raw := range claims {
+		if !strings.HasPrefix(key, "urn:zitadel:iam:org:project:") || !strings.HasSuffix(key, ":roles") {
+			continue
+		}
+		if roleMap, ok := raw.(map[string]interface{}); ok {
+			if _, has := roleMap[role]; has {
+				return true
+			}
+		}
+	}
+
 	return false
 }
 
