@@ -3,7 +3,6 @@ package main
 import (
 	"flag"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 )
@@ -23,7 +22,7 @@ func main() {
 		"Listen address (env: LISTEN_ADDR)")
 
 	if err := fs.Parse(os.Args[1:]); err != nil {
-		log.Fatal(err)
+		logFatal("flag parse failed", "error", err)
 	}
 
 	if *oidcIssuer == "" {
@@ -39,19 +38,21 @@ func main() {
 		RoleClaim:  *oidcRoleClaim,
 	})
 	if err != nil {
-		log.Fatalf("Failed to create OIDC verifier: %v", err)
+		logFatal("failed to create OIDC verifier", "error", err)
 	}
 
-	http.HandleFunc("/", requireAuth(verifyHandler, verifier))
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", healthzHandler)
+	mux.HandleFunc("GET /metrics", metricsHandler)
+	mux.HandleFunc("POST /", requireAuth(verifyHandler, verifier))
 
-	fmt.Println("--- Privasys Attestation Server ---")
-	fmt.Printf("OIDC issuer : %s\n", *oidcIssuer)
-	fmt.Printf("OIDC audience: %s\n", *oidcAudience)
-	fmt.Printf("Client role  : %s\n", *oidcClientRole)
-	fmt.Printf("Listening on %s\n", *listen)
-	fmt.Println("Endpoint:")
-	fmt.Println("  POST /  (Bearer token, role: attestation-server:client)")
-	log.Fatal(http.ListenAndServe(*listen, nil))
+	logInfo("attestation server starting",
+		"oidc_issuer", *oidcIssuer,
+		"oidc_audience", *oidcAudience,
+		"client_role", *oidcClientRole,
+		"listen", *listen,
+	)
+	logFatal("http server exited", "error", http.ListenAndServe(*listen, mux))
 }
 
 func envOrDefault(key, fallback string) string {
@@ -59,4 +60,11 @@ func envOrDefault(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// healthzHandler returns 200 OK for load balancer probes.
+func healthzHandler(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"status":"ok"}`))
 }

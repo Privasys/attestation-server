@@ -6,8 +6,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
+	"time"
 
 	tdxAbi "github.com/google/go-tdx-guest/abi"
 	tdxCheck "github.com/google/go-tdx-guest/verify"
@@ -56,6 +56,9 @@ func quoteType(raw []byte) string {
 }
 
 func verifyHandler(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	verifyTotal.Add(1)
+
 	if r.Method != http.MethodPost {
 		http.Error(w, "Only POST allowed", http.StatusMethodNotAllowed)
 		return
@@ -80,14 +83,17 @@ func verifyHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	qType := quoteType(quoteRaw)
-	log.Printf("Received %s quote (%d bytes)", qType, len(quoteRaw))
+	logInfo("quote received", "type", qType, "bytes", len(quoteRaw))
 
 	switch qType {
 	case "tdx":
-		verifyTDX(w, quoteRaw)
+		verifyTDXTotal.Add(1)
+		verifyTDX(w, quoteRaw, start)
 	case "sgx":
-		verifySGX(w, quoteRaw)
+		verifySGXTotal.Add(1)
+		verifySGX(w, quoteRaw, start)
 	default:
+		verifyFailTotal.Add(1)
 		sendJSON(w, 400, VerifyResponse{
 			Success: false,
 			Error:   fmt.Sprintf("Unsupported quote format (version %d)", binary.LittleEndian.Uint16(quoteRaw[:2])),
@@ -96,10 +102,11 @@ func verifyHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // verifyTDX uses google/go-tdx-guest to verify a TDX v4 quote in pure Go.
-func verifyTDX(w http.ResponseWriter, quoteRaw []byte) {
+func verifyTDX(w http.ResponseWriter, quoteRaw []byte, start time.Time) {
 	// Parse the raw quote into a structured object.
 	quote, err := tdxAbi.QuoteToProto(quoteRaw)
 	if err != nil {
+		verifyFailTotal.Add(1)
 		sendJSON(w, 400, VerifyResponse{
 			Success: false,
 			Error:   fmt.Sprintf("Failed to parse TDX quote: %v", err),
@@ -111,6 +118,8 @@ func verifyTDX(w http.ResponseWriter, quoteRaw []byte) {
 	// Options{} uses default verification (signature + cert chain only,
 	// no collateral/TCB check — add TdxOptions for stricter checks).
 	if err := tdxCheck.TdxQuote(quote, &tdxCheck.Options{}); err != nil {
+		verifyFailTotal.Add(1)
+		recordVerifyDuration(time.Since(start))
 		sendJSON(w, 200, VerifyResponse{
 			Success: false,
 			Status:  "VERIFICATION_FAILED",
@@ -125,6 +134,8 @@ func verifyTDX(w http.ResponseWriter, quoteRaw []byte) {
 		mrtd = hex.EncodeToString(quoteRaw[184:232])
 	}
 
+	verifySuccessTotal.Add(1)
+	recordVerifyDuration(time.Since(start))
 	sendJSON(w, 200, VerifyResponse{
 		Success: true,
 		Status:  "OK",
@@ -136,9 +147,10 @@ func verifyTDX(w http.ResponseWriter, quoteRaw []byte) {
 
 // verifySGX parses and cryptographically verifies an SGX DCAP Quote v3
 // entirely in Go: ECDSA signatures, attestation key binding, and cert chain.
-func verifySGX(w http.ResponseWriter, quoteRaw []byte) {
+func verifySGX(w http.ResponseWriter, quoteRaw []byte, start time.Time) {
 	quote, err := ParseSGXQuote(quoteRaw)
 	if err != nil {
+		verifyFailTotal.Add(1)
 		sendJSON(w, 400, VerifyResponse{
 			Success: false,
 			Error:   fmt.Sprintf("Failed to parse SGX quote: %v", err),
@@ -147,7 +159,9 @@ func verifySGX(w http.ResponseWriter, quoteRaw []byte) {
 	}
 
 	if err := quote.VerifyAll(); err != nil {
-		log.Printf("SGX verification failed: %v", err)
+		logWarn("sgx verification failed", "error", err)
+		verifyFailTotal.Add(1)
+		recordVerifyDuration(time.Since(start))
 		sendJSON(w, 200, VerifyResponse{
 			Success: false,
 			Status:  "VERIFICATION_FAILED",
@@ -163,9 +177,14 @@ func verifySGX(w http.ResponseWriter, quoteRaw []byte) {
 	prodID := quote.ISVProdID()
 	svn := quote.ISVSVN()
 
-	log.Printf("SGX quote verified (%s ECDSA) — MRENCLAVE=%x MRSIGNER=%x",
-		byteOrder, quote.MRENCLAVE(), quote.MRSIGNER())
+	logInfo("sgx quote verified",
+		"byte_order", byteOrder,
+		"mrenclave", hex.EncodeToString(quote.MRENCLAVE()),
+		"mrsigner", hex.EncodeToString(quote.MRSIGNER()),
+	)
 
+	verifySuccessTotal.Add(1)
+	recordVerifyDuration(time.Since(start))
 	sendJSON(w, 200, VerifyResponse{
 		Success:   true,
 		Status:    "OK",

@@ -13,7 +13,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"math/big"
 	"net/http"
 	"strings"
@@ -145,10 +144,12 @@ func requireAuth(next http.HandlerFunc, verifier *OIDCVerifier) http.HandlerFunc
 	return func(w http.ResponseWriter, r *http.Request) {
 		auth := r.Header.Get("Authorization")
 		if auth == "" {
+			authFailTotal.Add(1)
 			sendJSON(w, 401, VerifyResponse{Success: false, Error: "Missing Authorization header"})
 			return
 		}
 		if !strings.HasPrefix(auth, "Bearer ") {
+			authFailTotal.Add(1)
 			sendJSON(w, 401, VerifyResponse{Success: false, Error: "Authorization must use Bearer scheme"})
 			return
 		}
@@ -156,11 +157,12 @@ func requireAuth(next http.HandlerFunc, verifier *OIDCVerifier) http.HandlerFunc
 
 		subject, err := verifier.Authenticate(tokenStr)
 		if err != nil {
+			authFailTotal.Add(1)
 			sendJSON(w, 401, VerifyResponse{Success: false, Error: fmt.Sprintf("Authentication failed: %v", err)})
 			return
 		}
 
-		log.Printf("Authenticated request from %q", subject)
+		logInfo("authenticated request", "subject", subject)
 		next(w, r)
 	}
 }
@@ -363,7 +365,7 @@ func (v *OIDCVerifier) fetchJWKS(uri string) (map[string]*jwkKey, error) {
 		k := &jwksResp.Keys[i]
 		keys[k.Kid] = k
 	}
-	log.Printf("JWKS: fetched %d signing keys", len(keys))
+	logInfo("jwks fetched", "key_count", len(keys))
 	return keys, nil
 }
 
