@@ -19,7 +19,9 @@ import (
 
 // VerifyRequest is the expected JSON body for POST /api/verify.
 type VerifyRequest struct {
-	Quote string `json:"quote"` // base64-encoded raw quote bytes
+	Quote    string `json:"quote"`              // base64-encoded raw quote bytes
+	Type     string `json:"type,omitempty"`     // optional: "sgx", "tdx", "sev-snp", "nvidia-gpu", "tdx-gpu"
+	GPUQuote string `json:"gpuQuote,omitempty"` // base64-encoded NVIDIA GPU evidence (for "tdx-gpu" combined attestation)
 }
 
 // VerifyResponse is returned by the verify and error endpoints.
@@ -34,25 +36,68 @@ type VerifyResponse struct {
 	ISVSVN      *uint16  `json:"isvSvn,omitempty"`
 	TcbDate     string   `json:"tcbDate,omitempty"`
 	AdvisoryIDs []string `json:"advisoryIds,omitempty"`
-	Message     string   `json:"message,omitempty"`
-	Error       string   `json:"error,omitempty"`
+	// SEV-SNP fields
+	Measurement string `json:"measurement,omitempty"` // SEV-SNP MEASUREMENT (48 bytes hex)
+	HostData    string `json:"hostData,omitempty"`    // SEV-SNP HOST_DATA (32 bytes hex)
+	ReportID    string `json:"reportId,omitempty"`    // SEV-SNP REPORT_ID (32 bytes hex)
+	// GPU attestation (for combined tdx-gpu / sev-snp-gpu attestation)
+	GPUAttestation *GPUAttestationResult `json:"gpuAttestation,omitempty"`
+	Message        string                `json:"message,omitempty"`
+	Error          string                `json:"error,omitempty"`
 }
 
-// quoteType detects whether raw bytes are an SGX (v3) or TDX (v4) quote
-// by reading the little-endian uint16 version field at offset 0.
+// GPUAttestationResult holds the result of NVIDIA GPU attestation.
+type GPUAttestationResult struct {
+	Verified bool   `json:"verified"`
+	Status   string `json:"status,omitempty"`
+	Message  string `json:"message,omitempty"`
+	Error    string `json:"error,omitempty"`
+}
+
+// quoteType auto-detects the attestation evidence type from raw bytes.
+//
+// Intel DCAP quotes start with a uint16 version (3=SGX, 4=TDX) followed
+// by att_key_type (uint16, typically 2). AMD SEV-SNP reports use a uint32
+// version (2-5) so bytes[2:4] are zero. We use this to disambiguate
+// SEV-SNP v3 reports from SGX v3 quotes.
+//
+// NVIDIA GPU evidence cannot be auto-detected and must use the explicit
+// "type" field in the request.
 func quoteType(raw []byte) string {
 	if len(raw) < 4 {
 		return "unknown"
 	}
-	version := binary.LittleEndian.Uint16(raw[:2])
-	switch version {
+	version16 := binary.LittleEndian.Uint16(raw[:2])
+	switch version16 {
+	case 2:
+		// SEV-SNP report version 2 (uint32 version = 2, bytes[2:4] = 0)
+		if len(raw) >= 0x4A0 {
+			return "sev-snp"
+		}
 	case 3:
+		// Disambiguate: SGX DCAP v3 (att_key_type at offset 2) vs SEV-SNP v3.
+		// SGX: bytes[2:4] = att_key_type (usually 2 = ECDSA-P256-SHA256).
+		// SEV-SNP: bytes[2:4] = upper 16 bits of uint32 version = 0.
+		attKeyType := binary.LittleEndian.Uint16(raw[2:4])
+		if attKeyType == 0 && len(raw) >= 0x4A0 {
+			return "sev-snp"
+		}
 		return "sgx"
 	case 4:
+		// Could also be SEV-SNP v4 if att_key_type == 0, but v4 not yet
+		// released. Prefer TDX for now.
+		attKeyType := binary.LittleEndian.Uint16(raw[2:4])
+		if attKeyType == 0 && len(raw) >= 0x4A0 {
+			return "sev-snp"
+		}
 		return "tdx"
-	default:
-		return "unknown"
+	case 5:
+		// SEV-SNP report version 5
+		if len(raw) >= 0x4A0 {
+			return "sev-snp"
+		}
 	}
+	return "unknown"
 }
 
 func verifyHandler(w http.ResponseWriter, r *http.Request) {
@@ -82,7 +127,11 @@ func verifyHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	qType := quoteType(quoteRaw)
+	// Determine evidence type: explicit "type" field takes precedence.
+	qType := req.Type
+	if qType == "" {
+		qType = quoteType(quoteRaw)
+	}
 	logInfo("quote received", "type", qType, "bytes", len(quoteRaw))
 
 	switch qType {
@@ -92,11 +141,22 @@ func verifyHandler(w http.ResponseWriter, r *http.Request) {
 	case "sgx":
 		verifySGXTotal.Add(1)
 		verifySGX(w, quoteRaw, start)
+	case "sev-snp":
+		verifySEVSNPTotal.Add(1)
+		verifySEVSNP(w, quoteRaw, start)
+	case "nvidia-gpu":
+		verifyNVIDIAGPUTotal.Add(1)
+		verifyNVIDIAGPU(w, quoteRaw, start)
+	case "tdx-gpu":
+		verifyTDXTotal.Add(1)
+		verifyNVIDIAGPUTotal.Add(1)
+		verifyTDXGPUTotal.Add(1)
+		verifyTDXGPU(w, quoteRaw, req.GPUQuote, start)
 	default:
 		verifyFailTotal.Add(1)
 		sendJSON(w, 400, VerifyResponse{
 			Success: false,
-			Error:   fmt.Sprintf("Unsupported quote format (version %d)", binary.LittleEndian.Uint16(quoteRaw[:2])),
+			Error:   fmt.Sprintf("Unsupported quote format (type=%q)", qType),
 		})
 	}
 }
@@ -194,6 +254,101 @@ func verifySGX(w http.ResponseWriter, quoteRaw []byte, start time.Time) {
 		ISVProdID: &prodID,
 		ISVSVN:    &svn,
 		Message:   "SGX DCAP Quote v3 verified (signature + attestation key binding + certificate chain)",
+	})
+}
+
+// verifyTDXGPU performs combined Intel TDX + NVIDIA GPU attestation.
+// The TDX quote verifies CPU/memory confidentiality; the GPU evidence
+// (forwarded to NRAS) verifies the GPU is in CC mode.
+func verifyTDXGPU(w http.ResponseWriter, tdxQuoteRaw []byte, gpuQuoteB64 string, start time.Time) {
+	// 1. Verify TDX quote
+	quote, err := tdxAbi.QuoteToProto(tdxQuoteRaw)
+	if err != nil {
+		verifyFailTotal.Add(1)
+		sendJSON(w, 400, VerifyResponse{
+			Success: false,
+			TeeType: "tdx-gpu",
+			Error:   fmt.Sprintf("Failed to parse TDX quote: %v", err),
+		})
+		return
+	}
+
+	if err := tdxCheck.TdxQuote(quote, &tdxCheck.Options{}); err != nil {
+		verifyFailTotal.Add(1)
+		recordVerifyDuration(time.Since(start))
+		sendJSON(w, 200, VerifyResponse{
+			Success: false,
+			Status:  "VERIFICATION_FAILED",
+			TeeType: "tdx-gpu",
+			Error:   fmt.Sprintf("TDX quote verification failed: %v", err),
+		})
+		return
+	}
+
+	var mrtd string
+	if len(tdxQuoteRaw) >= 232 {
+		mrtd = hex.EncodeToString(tdxQuoteRaw[184:232])
+	}
+
+	// 2. Verify NVIDIA GPU evidence (if provided)
+	var gpuResult *GPUAttestationResult
+	if gpuQuoteB64 != "" {
+		gpuEvidence, err := base64.StdEncoding.DecodeString(gpuQuoteB64)
+		if err != nil {
+			verifyFailTotal.Add(1)
+			recordVerifyDuration(time.Since(start))
+			sendJSON(w, 400, VerifyResponse{
+				Success: false,
+				TeeType: "tdx-gpu",
+				Error:   "Invalid base64 in 'gpuQuote' field",
+			})
+			return
+		}
+
+		msg, gpuErr := forwardToNRAS(nvidiaVerifierURL, gpuEvidence)
+		if gpuErr != nil {
+			gpuResult = &GPUAttestationResult{
+				Verified: false,
+				Status:   "VERIFICATION_FAILED",
+				Error:    gpuErr.Error(),
+			}
+		} else {
+			gpuResult = &GPUAttestationResult{
+				Verified: true,
+				Status:   "OK",
+				Message:  msg,
+			}
+		}
+	}
+
+	// Overall success requires TDX pass. GPU failure is reported but
+	// does not block the TDX result (caller decides policy).
+	overallSuccess := true
+	status := "OK"
+	msg := "TDX quote verified"
+	if gpuResult != nil && gpuResult.Verified {
+		msg = "TDX quote + NVIDIA GPU attestation verified"
+	} else if gpuResult != nil && !gpuResult.Verified {
+		overallSuccess = false
+		status = "PARTIAL"
+		msg = "TDX quote verified, NVIDIA GPU attestation failed"
+	} else if gpuQuoteB64 == "" {
+		msg = "TDX quote verified (no GPU evidence provided)"
+	}
+
+	if overallSuccess {
+		verifySuccessTotal.Add(1)
+	} else {
+		verifyFailTotal.Add(1)
+	}
+	recordVerifyDuration(time.Since(start))
+	sendJSON(w, 200, VerifyResponse{
+		Success:        overallSuccess,
+		Status:         status,
+		TeeType:        "tdx-gpu",
+		MRTD:           mrtd,
+		GPUAttestation: gpuResult,
+		Message:        msg,
 	})
 }
 

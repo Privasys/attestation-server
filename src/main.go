@@ -18,6 +18,8 @@ func main() {
 		"OIDC role required for verification requests (env: OIDC_CLIENT_ROLE)")
 	oidcRoleClaim := fs.String("oidc-role-claim", envOrDefault("OIDC_ROLE_CLAIM", "urn:zitadel:iam:org:project:roles"),
 		"JWT claim key containing roles (env: OIDC_ROLE_CLAIM)")
+	nrasURL := fs.String("nvidia-nras-url", envOrDefault("NVIDIA_NRAS_URL", ""),
+		"NVIDIA NRAS endpoint for GPU attestation verification (env: NVIDIA_NRAS_URL)")
 	listen := fs.String("listen", envOrDefault("LISTEN_ADDR", ":8080"),
 		"Listen address (env: LISTEN_ADDR)")
 
@@ -37,6 +39,11 @@ func main() {
 		ClientRole: *oidcClientRole,
 		RoleClaim:  *oidcRoleClaim,
 	})
+
+	// Set NVIDIA NRAS URL for GPU attestation verification.
+	if *nrasURL != "" {
+		nvidiaVerifierURL = *nrasURL
+	}
 	if err != nil {
 		logFatal("failed to create OIDC verifier", "error", err)
 	}
