@@ -26,8 +26,8 @@ import (
 
 // OIDCConfig holds the OIDC verification settings.
 type OIDCConfig struct {
-	// Issuer is the OIDC issuer URL (e.g. https://auth.example.com).
-	Issuer string
+	// Issuers is the list of trusted OIDC issuer URLs.
+	Issuers []string
 
 	// Audience is the expected "aud" claim (e.g. "attestation-server").
 	// Empty string disables audience validation.
@@ -48,15 +48,21 @@ type OIDCConfig struct {
 
 // OIDCVerifier validates OIDC bearer tokens via JWKS discovery.
 type OIDCVerifier struct {
-	cfg    *OIDCConfig
+	cfg       *OIDCConfig
+	issuers   map[string]*issuerState // keyed by issuer URL
+	issuersMu sync.RWMutex
+}
+
+// issuerState holds the JWKS cache for a single issuer.
+type issuerState struct {
 	jwks   *jwksCache
 	jwksMu sync.RWMutex
 }
 
 // NewOIDCVerifier creates a verifier for the given OIDC configuration.
 func NewOIDCVerifier(cfg *OIDCConfig) (*OIDCVerifier, error) {
-	if cfg.Issuer == "" {
-		return nil, errors.New("OIDC issuer is required")
+	if len(cfg.Issuers) == 0 {
+		return nil, errors.New("at least one OIDC issuer is required")
 	}
 	if cfg.ClientRole == "" {
 		cfg.ClientRole = "attestation-server:client"
@@ -64,7 +70,18 @@ func NewOIDCVerifier(cfg *OIDCConfig) (*OIDCVerifier, error) {
 	if cfg.RoleClaim == "" {
 		cfg.RoleClaim = "urn:zitadel:iam:org:project:roles"
 	}
-	return &OIDCVerifier{cfg: cfg}, nil
+	issuers := make(map[string]*issuerState, len(cfg.Issuers))
+	for _, iss := range cfg.Issuers {
+		issuers[iss] = &issuerState{}
+	}
+	return &OIDCVerifier{cfg: cfg, issuers: issuers}, nil
+}
+
+// getIssuerState returns the issuerState for a trusted issuer, or nil.
+func (v *OIDCVerifier) getIssuerState(issuer string) *issuerState {
+	v.issuersMu.RLock()
+	defer v.issuersMu.RUnlock()
+	return v.issuers[issuer]
 }
 
 // Authenticate verifies an OIDC bearer token and checks the client role.
@@ -87,8 +104,25 @@ func (v *OIDCVerifier) Authenticate(tokenStr string) (subject string, err error)
 		return "", fmt.Errorf("header parse: %w", err)
 	}
 
-	// Get signing key from JWKS.
-	jwk, err := v.getSigningKey(header.Kid, header.Alg)
+	// Decode claims early to determine issuer before JWKS lookup.
+	claimsJSON, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return "", fmt.Errorf("claims decode: %w", err)
+	}
+	var claims map[string]interface{}
+	if err := json.Unmarshal(claimsJSON, &claims); err != nil {
+		return "", fmt.Errorf("claims parse: %w", err)
+	}
+
+	// Validate issuer (check against all trusted issuers).
+	iss, _ := claims["iss"].(string)
+	state := v.getIssuerState(iss)
+	if state == nil {
+		return "", fmt.Errorf("untrusted issuer %q", iss)
+	}
+
+	// Get signing key from JWKS for this issuer.
+	jwk, err := v.getSigningKeyForIssuer(state, iss, header.Kid, header.Alg)
 	if err != nil {
 		return "", fmt.Errorf("JWKS lookup: %w", err)
 	}
@@ -101,21 +135,6 @@ func (v *OIDCVerifier) Authenticate(tokenStr string) (subject string, err error)
 	}
 	if err := jwkVerify(header.Alg, jwk, signingInput, sigBytes); err != nil {
 		return "", fmt.Errorf("signature: %w", err)
-	}
-
-	// Decode claims.
-	claimsJSON, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return "", fmt.Errorf("claims decode: %w", err)
-	}
-	var claims map[string]interface{}
-	if err := json.Unmarshal(claimsJSON, &claims); err != nil {
-		return "", fmt.Errorf("claims parse: %w", err)
-	}
-
-	// Validate issuer.
-	if iss, _ := claims["iss"].(string); iss != v.cfg.Issuer {
-		return "", fmt.Errorf("issuer %q != expected %q", iss, v.cfg.Issuer)
 	}
 
 	// Validate audience.
@@ -274,27 +293,27 @@ type oidcDiscovery struct {
 	JwksURI string `json:"jwks_uri"`
 }
 
-func (v *OIDCVerifier) getSigningKey(kid, alg string) (*jwkKey, error) {
-	v.jwksMu.RLock()
-	if v.jwks != nil && time.Since(v.jwks.fetchedAt) < 5*time.Minute {
-		if key, ok := v.jwks.keys[kid]; ok {
-			v.jwksMu.RUnlock()
+func (v *OIDCVerifier) getSigningKeyForIssuer(s *issuerState, issuer, kid, alg string) (*jwkKey, error) {
+	s.jwksMu.RLock()
+	if s.jwks != nil && time.Since(s.jwks.fetchedAt) < 5*time.Minute {
+		if key, ok := s.jwks.keys[kid]; ok {
+			s.jwksMu.RUnlock()
 			return key, nil
 		}
 	}
-	v.jwksMu.RUnlock()
+	s.jwksMu.RUnlock()
 
-	v.jwksMu.Lock()
-	defer v.jwksMu.Unlock()
+	s.jwksMu.Lock()
+	defer s.jwksMu.Unlock()
 
 	// Double-check after acquiring write lock.
-	if v.jwks != nil && time.Since(v.jwks.fetchedAt) < 5*time.Minute {
-		if key, ok := v.jwks.keys[kid]; ok {
+	if s.jwks != nil && time.Since(s.jwks.fetchedAt) < 5*time.Minute {
+		if key, ok := s.jwks.keys[kid]; ok {
 			return key, nil
 		}
 	}
 
-	jwksURI, err := v.discoverJWKS()
+	jwksURI, err := v.discoverJWKS(issuer)
 	if err != nil {
 		return nil, err
 	}
@@ -302,7 +321,7 @@ func (v *OIDCVerifier) getSigningKey(kid, alg string) (*jwkKey, error) {
 	if err != nil {
 		return nil, err
 	}
-	v.jwks = &jwksCache{keys: keys, fetchedAt: time.Now()}
+	s.jwks = &jwksCache{keys: keys, fetchedAt: time.Now()}
 
 	if key, ok := keys[kid]; ok {
 		return key, nil
@@ -318,11 +337,11 @@ func (v *OIDCVerifier) getSigningKey(kid, alg string) (*jwkKey, error) {
 	return nil, fmt.Errorf("key %q not found in JWKS", kid)
 }
 
-func (v *OIDCVerifier) discoverJWKS() (string, error) {
+func (v *OIDCVerifier) discoverJWKS(issuer string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	url := strings.TrimRight(v.cfg.Issuer, "/") + "/.well-known/openid-configuration"
+	url := strings.TrimRight(issuer, "/") + "/.well-known/openid-configuration"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", err

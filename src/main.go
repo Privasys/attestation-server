@@ -5,13 +5,14 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 )
 
 func main() {
 	fs := flag.NewFlagSet("attestation-server", flag.ExitOnError)
 
 	oidcIssuer := fs.String("oidc-issuer", envOrDefault("OIDC_ISSUER", ""),
-		"OIDC issuer URL for bearer token verification (required, env: OIDC_ISSUER)")
+		"Comma-separated OIDC issuer URLs for bearer token verification (required, env: OIDC_ISSUER)")
 	oidcAudience := fs.String("oidc-audience", envOrDefault("OIDC_AUDIENCE", "attestation-server"),
 		"Expected OIDC audience claim (env: OIDC_AUDIENCE)")
 	oidcClientRole := fs.String("oidc-client-role", envOrDefault("OIDC_CLIENT_ROLE", "attestation-server:client"),
@@ -33,8 +34,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	issuers := strings.Split(*oidcIssuer, ",")
+	for i := range issuers {
+		issuers[i] = strings.TrimSpace(issuers[i])
+	}
+
 	verifier, err := NewOIDCVerifier(&OIDCConfig{
-		Issuer:     *oidcIssuer,
+		Issuers:    issuers,
 		Audience:   *oidcAudience,
 		ClientRole: *oidcClientRole,
 		RoleClaim:  *oidcRoleClaim,
