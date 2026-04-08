@@ -41,11 +41,24 @@ All flags also accept environment variable overrides.
 
 | Flag                 | Env var            | Default                                   | Description                       |
 |----------------------|--------------------|-------------------------------------------|-----------------------------------|
-| `--oidc-issuer`      | `OIDC_ISSUER`      | —                                         | OIDC issuer URL (**required**)    |
+| `--oidc-issuer`      | `OIDC_ISSUER`      | —                                         | OIDC issuer URL(s) (**required**, comma-separated for multiple) |
 | `--oidc-audience`    | `OIDC_AUDIENCE`    | `attestation-server`                      | Expected `aud` claim              |
 | `--oidc-client-role` | `OIDC_CLIENT_ROLE`  | `attestation-server:client`              | Required OIDC role                |
 | `--oidc-role-claim`  | `OIDC_ROLE_CLAIM`   | `urn:zitadel:iam:org:project:roles`     | JWT claim key containing roles    |
 | `--listen`           | `LISTEN_ADDR`      | `:8080`                                   | Listen address                    |
+
+### Multi-issuer support
+
+The server supports multiple OIDC issuers. Provide a comma-separated list:
+
+```bash
+OIDC_ISSUER=https://auth.example.com,https://broker.example.com
+```
+
+Each issuer gets its own JWKS cache and OIDC discovery. On token validation,
+the server reads the `iss` claim from the JWT and validates against the
+corresponding issuer's JWKS. This allows accepting tokens from both an
+identity provider (e.g. Zitadel) and an app attestation broker.
 
 ### Role claim formats
 

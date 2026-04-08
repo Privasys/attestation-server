@@ -105,10 +105,26 @@ when verifying quotes against authenticated attestation servers.
 
 ## JWKS caching
 
-The server caches JWKS keys for 5 minutes. On first request (or after
-cache expiry), it performs OIDC discovery:
+The server caches JWKS keys for 5 minutes per issuer. On first request
+(or after cache expiry), it performs OIDC discovery:
 
 1. `GET <issuer>/.well-known/openid-configuration` → extracts `jwks_uri`
 2. `GET <jwks_uri>` → fetches signing keys
 
 Both requests have a 10-second timeout.
+
+## Multi-issuer support
+
+The server can trust multiple OIDC issuers simultaneously. Set
+`OIDC_ISSUER` to a comma-separated list:
+
+```bash
+OIDC_ISSUER=https://auth.example.com,https://broker.example.com
+```
+
+Each issuer maintains its own independent JWKS cache. When validating a
+token, the server extracts the `iss` claim and looks up the matching
+issuer's cached keys. Tokens from unrecognized issuers are rejected.
+
+This is used in production to accept tokens from both the platform
+identity provider and the auth broker's app attestation token flow.
