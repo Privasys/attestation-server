@@ -11,12 +11,15 @@ import (
 // Minimal Prometheus-compatible metrics — zero external dependencies.
 
 var (
-	verifyTotal        atomic.Int64
-	verifySuccessTotal atomic.Int64
-	verifyFailTotal    atomic.Int64
-	verifySGXTotal     atomic.Int64
-	verifyTDXTotal     atomic.Int64
-	authFailTotal      atomic.Int64
+	verifyTotal          atomic.Int64
+	verifySuccessTotal   atomic.Int64
+	verifyFailTotal      atomic.Int64
+	verifySGXTotal       atomic.Int64
+	verifyTDXTotal       atomic.Int64
+	verifySEVSNPTotal    atomic.Int64
+	verifyNVIDIAGPUTotal atomic.Int64
+	verifyTDXGPUTotal    atomic.Int64
+	authFailTotal        atomic.Int64
 
 	// Histogram buckets (seconds): 10ms, 50ms, 100ms, 250ms, 500ms, 1s, 5s
 	histBuckets = []float64{0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 5.0}
@@ -62,6 +65,18 @@ func metricsHandler(w http.ResponseWriter, _ *http.Request) {
 	fmt.Fprintf(w, "# HELP attestation_verify_tdx_total TDX quote verifications.\n")
 	fmt.Fprintf(w, "# TYPE attestation_verify_tdx_total counter\n")
 	fmt.Fprintf(w, "attestation_verify_tdx_total %d\n", verifyTDXTotal.Load())
+
+	fmt.Fprintf(w, "# HELP attestation_verify_sev_snp_total SEV-SNP report verifications.\n")
+	fmt.Fprintf(w, "# TYPE attestation_verify_sev_snp_total counter\n")
+	fmt.Fprintf(w, "attestation_verify_sev_snp_total %d\n", verifySEVSNPTotal.Load())
+
+	fmt.Fprintf(w, "# HELP attestation_verify_nvidia_gpu_total NVIDIA GPU attestation verifications.\n")
+	fmt.Fprintf(w, "# TYPE attestation_verify_nvidia_gpu_total counter\n")
+	fmt.Fprintf(w, "attestation_verify_nvidia_gpu_total %d\n", verifyNVIDIAGPUTotal.Load())
+
+	fmt.Fprintf(w, "# HELP attestation_verify_tdx_gpu_total Combined TDX+GPU attestation verifications.\n")
+	fmt.Fprintf(w, "# TYPE attestation_verify_tdx_gpu_total counter\n")
+	fmt.Fprintf(w, "attestation_verify_tdx_gpu_total %d\n", verifyTDXGPUTotal.Load())
 
 	fmt.Fprintf(w, "# HELP attestation_auth_fail_total Authentication failures.\n")
 	fmt.Fprintf(w, "# TYPE attestation_auth_fail_total counter\n")
