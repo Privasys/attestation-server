@@ -29,12 +29,12 @@ type OIDCConfig struct {
 	// Issuers is the list of trusted OIDC issuer URLs.
 	Issuers []string
 
-	// Audience is the expected "aud" claim (e.g. "attestation-server").
-	// Empty string disables audience validation.
-	Audience string
+	// Audiences is the list of accepted "aud" claim values. A token is accepted
+	// if its aud matches any of these. Empty list disables audience validation.
+	Audiences []string
 
 	// ClientRole is the OIDC role required to call the verify endpoint.
-	// Default: "attestation-server:client".
+	// Empty string disables role checking (any authenticated token is accepted).
 	ClientRole string
 
 	// RoleClaim is the JWT claim key containing roles.
@@ -63,9 +63,6 @@ type issuerState struct {
 func NewOIDCVerifier(cfg *OIDCConfig) (*OIDCVerifier, error) {
 	if len(cfg.Issuers) == 0 {
 		return nil, errors.New("at least one OIDC issuer is required")
-	}
-	if cfg.ClientRole == "" {
-		cfg.ClientRole = "attestation-server:client"
 	}
 	if cfg.RoleClaim == "" {
 		cfg.RoleClaim = "urn:zitadel:iam:org:project:roles"
@@ -137,9 +134,9 @@ func (v *OIDCVerifier) Authenticate(tokenStr string) (subject string, err error)
 		return "", fmt.Errorf("signature: %w", err)
 	}
 
-	// Validate audience.
-	if v.cfg.Audience != "" && !checkAudience(claims, v.cfg.Audience) {
-		return "", fmt.Errorf("audience missing %q", v.cfg.Audience)
+	// Validate audience: accept if token aud matches any configured audience.
+	if len(v.cfg.Audiences) > 0 && !checkAudienceAny(claims, v.cfg.Audiences) {
+		return "", fmt.Errorf("audience missing %v", v.cfg.Audiences)
 	}
 
 	// Validate expiry.
@@ -149,8 +146,8 @@ func (v *OIDCVerifier) Authenticate(tokenStr string) (subject string, err error)
 		}
 	}
 
-	// Check role.
-	if !checkRole(claims, v.cfg.ClientRole, v.cfg.RoleClaim) {
+	// Check role (only if a role is configured).
+	if v.cfg.ClientRole != "" && !checkRole(claims, v.cfg.ClientRole, v.cfg.RoleClaim) {
 		return "", fmt.Errorf("missing required role %q", v.cfg.ClientRole)
 	}
 
@@ -199,6 +196,16 @@ func checkAudience(claims map[string]interface{}, expected string) bool {
 			if s, ok := a.(string); ok && s == expected {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// checkAudienceAny returns true if the token's aud claim matches any of the expected values.
+func checkAudienceAny(claims map[string]interface{}, expected []string) bool {
+	for _, want := range expected {
+		if checkAudience(claims, want) {
+			return true
 		}
 	}
 	return false

@@ -14,9 +14,9 @@ func main() {
 	oidcIssuer := fs.String("oidc-issuer", envOrDefault("OIDC_ISSUER", ""),
 		"Comma-separated OIDC issuer URLs for bearer token verification (required, env: OIDC_ISSUER)")
 	oidcAudience := fs.String("oidc-audience", envOrDefault("OIDC_AUDIENCE", "attestation-server"),
-		"Expected OIDC audience claim (env: OIDC_AUDIENCE)")
-	oidcClientRole := fs.String("oidc-client-role", envOrDefault("OIDC_CLIENT_ROLE", "attestation-server:client"),
-		"OIDC role required for verification requests (env: OIDC_CLIENT_ROLE)")
+		"Comma-separated accepted OIDC audience claim values (env: OIDC_AUDIENCE). A token is accepted if its aud matches any of these.")
+	oidcClientRole := fs.String("oidc-client-role", envOrDefault("OIDC_CLIENT_ROLE", ""),
+		"Optional OIDC role required for verification requests. Empty (default) accepts any authenticated token (env: OIDC_CLIENT_ROLE)")
 	oidcRoleClaim := fs.String("oidc-role-claim", envOrDefault("OIDC_ROLE_CLAIM", "urn:zitadel:iam:org:project:roles"),
 		"JWT claim key containing roles (env: OIDC_ROLE_CLAIM)")
 	nrasURL := fs.String("nvidia-nras-url", envOrDefault("NVIDIA_NRAS_URL", ""),
@@ -39,9 +39,16 @@ func main() {
 		issuers[i] = strings.TrimSpace(issuers[i])
 	}
 
+	var audiences []string
+	for _, a := range strings.Split(*oidcAudience, ",") {
+		if a = strings.TrimSpace(a); a != "" {
+			audiences = append(audiences, a)
+		}
+	}
+
 	verifier, err := NewOIDCVerifier(&OIDCConfig{
 		Issuers:    issuers,
-		Audience:   *oidcAudience,
+		Audiences:  audiences,
 		ClientRole: *oidcClientRole,
 		RoleClaim:  *oidcRoleClaim,
 	})
