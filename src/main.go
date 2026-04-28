@@ -72,7 +72,7 @@ func main() {
 		"client_role", *oidcClientRole,
 		"listen", *listen,
 	)
-	logFatal("http server exited", "error", http.ListenAndServe(*listen, mux))
+	logFatal("http server exited", "error", http.ListenAndServe(*listen, withCORS(mux)))
 }
 
 func envOrDefault(key, fallback string) string {
