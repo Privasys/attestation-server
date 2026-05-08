@@ -44,7 +44,7 @@ All flags also accept environment variable overrides.
 | `--oidc-issuer`      | `OIDC_ISSUER`      | —                                         | OIDC issuer URL(s) (**required**, comma-separated for multiple) |
 | `--oidc-audience`    | `OIDC_AUDIENCE`    | `attestation-server`                      | Expected `aud` claim              |
 | `--oidc-client-role` | `OIDC_CLIENT_ROLE`  | `attestation-server:client`              | Required OIDC role                |
-| `--oidc-role-claim`  | `OIDC_ROLE_CLAIM`   | `urn:zitadel:iam:org:project:roles`     | JWT claim key containing roles    |
+| `--oidc-role-claim`  | `OIDC_ROLE_CLAIM`   | `roles`                                  | JWT claim key containing roles    |
 | `--listen`           | `LISTEN_ADDR`      | `:8080`                                   | Listen address                    |
 
 ### Multi-issuer support
@@ -58,16 +58,14 @@ OIDC_ISSUER=https://auth.example.com,https://broker.example.com
 Each issuer gets its own JWKS cache and OIDC discovery. On token validation,
 the server reads the `iss` claim from the JWT and validates against the
 corresponding issuer's JWKS. This allows accepting tokens from both an
-identity provider (e.g. Zitadel) and an app attestation broker.
+identity provider (e.g. Privasys ID) and an app attestation broker.
 
 ### Role claim formats
 
-The server checks three claim paths (matching Zitadel, Keycloak, and
-standard OIDC providers):
+The server checks two claim paths (matching standard OIDC and Keycloak):
 
-1. **Zitadel** — `urn:zitadel:iam:org:project:roles` (map of role → metadata)
-2. **Standard** — `roles` (string array)
-3. **Keycloak** — `realm_access.roles` (string array)
+1. **Standard** (default) — `roles` (RFC 9068 §2.2.3.1 flat string array)
+2. **Keycloak** — `realm_access.roles` (string array)
 
 ## systemd service
 
@@ -110,7 +108,7 @@ See [docs/authentication.md](docs/authentication.md) for the full OIDC setup gui
 
 Callers must present a valid OIDC bearer token with the
 `attestation-server:client` role. Tokens are issued by your OIDC provider
-(e.g. Zitadel, Keycloak, Auth0).
+(e.g. Privasys ID, Keycloak, Auth0).
 
 ## Verify a quote
 

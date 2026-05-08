@@ -64,8 +64,8 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=/opt/attestation-server
-Environment=OIDC_ISSUER=https://auth.privasys.org
-Environment=OIDC_AUDIENCE=363481202289541124
+Environment=OIDC_ISSUER=https://privasys.id
+Environment=OIDC_AUDIENCE=attestation-server
 ExecStart=/opt/attestation-server/dist/attestation-server
 Restart=on-failure
 RestartSec=5

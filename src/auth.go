@@ -38,7 +38,7 @@ type OIDCConfig struct {
 	ClientRole string
 
 	// RoleClaim is the JWT claim key containing roles.
-	// Default: "urn:zitadel:iam:org:project:roles".
+	// Default: "roles" (RFC 9068 §2.2.3.1 flat string array).
 	RoleClaim string
 }
 
@@ -65,7 +65,7 @@ func NewOIDCVerifier(cfg *OIDCConfig) (*OIDCVerifier, error) {
 		return nil, errors.New("at least one OIDC issuer is required")
 	}
 	if cfg.RoleClaim == "" {
-		cfg.RoleClaim = "urn:zitadel:iam:org:project:roles"
+		cfg.RoleClaim = "roles"
 	}
 	issuers := make(map[string]*issuerState, len(cfg.Issuers))
 	for _, iss := range cfg.Issuers {
@@ -250,20 +250,6 @@ func checkRole(claims map[string]interface{}, role, roleClaim string) bool {
 				if s, ok := r.(string); ok && s == role {
 					return true
 				}
-			}
-		}
-	}
-
-	// 4. Zitadel project-specific role claims (urn:zitadel:iam:org:project:{id}:roles).
-	// When the "projects:roles" scope is used, Zitadel emits per-project claims
-	// with the project ID embedded in the claim key.
-	for key, raw := range claims {
-		if !strings.HasPrefix(key, "urn:zitadel:iam:org:project:") || !strings.HasSuffix(key, ":roles") {
-			continue
-		}
-		if roleMap, ok := raw.(map[string]interface{}); ok {
-			if _, has := roleMap[role]; has {
-				return true
 			}
 		}
 	}

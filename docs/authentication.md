@@ -12,13 +12,13 @@ with a valid token containing the required role.
 
 ## OIDC provider setup
 
-1. **Create a project** in your OIDC provider (Zitadel, Keycloak, Auth0, etc.)
+1. **Create a project** in your OIDC provider (Privasys ID, Keycloak, Auth0, etc.)
 2. **Define the role** `attestation-server:client`
 3. **Create a service account** (or user) and assign the role
 4. **Generate a token** — either a long-lived service account token or
    use the client credentials flow
 
-### Zitadel example
+### Privasys ID example
 
 ```
 Project: attestation-server
@@ -50,19 +50,9 @@ OIDC_AUDIENCE=attestation-server \
 
 ## Role claim formats
 
-The server checks three claim paths to support multiple OIDC providers:
+The server checks two claim paths to support multiple OIDC providers:
 
-### 1. Zitadel (default claim)
-
-```json
-{
-  "urn:zitadel:iam:org:project:roles": {
-    "attestation-server:client": { "orgId": "..." }
-  }
-}
-```
-
-### 2. Standard `roles` array
+### 1. Standard `roles` array (default, RFC 9068 §2.2.3.1)
 
 ```json
 {
@@ -70,7 +60,7 @@ The server checks three claim paths to support multiple OIDC providers:
 }
 ```
 
-### 3. Keycloak `realm_access`
+### 2. Keycloak `realm_access`
 
 ```json
 {

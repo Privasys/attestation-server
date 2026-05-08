@@ -17,7 +17,7 @@ func main() {
 		"Comma-separated accepted OIDC audience claim values (env: OIDC_AUDIENCE). A token is accepted if its aud matches any of these.")
 	oidcClientRole := fs.String("oidc-client-role", envOrDefault("OIDC_CLIENT_ROLE", ""),
 		"Optional OIDC role required for verification requests. Empty (default) accepts any authenticated token (env: OIDC_CLIENT_ROLE)")
-	oidcRoleClaim := fs.String("oidc-role-claim", envOrDefault("OIDC_ROLE_CLAIM", "urn:zitadel:iam:org:project:roles"),
+	oidcRoleClaim := fs.String("oidc-role-claim", envOrDefault("OIDC_ROLE_CLAIM", "roles"),
 		"JWT claim key containing roles (env: OIDC_ROLE_CLAIM)")
 	nrasURL := fs.String("nvidia-nras-url", envOrDefault("NVIDIA_NRAS_URL", ""),
 		"NVIDIA NRAS endpoint for GPU attestation verification (env: NVIDIA_NRAS_URL)")
