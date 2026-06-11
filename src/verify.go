@@ -10,6 +10,7 @@ import (
 	"time"
 
 	tdxAbi "github.com/google/go-tdx-guest/abi"
+	tdxPb "github.com/google/go-tdx-guest/proto/tdx"
 	tdxCheck "github.com/google/go-tdx-guest/verify"
 )
 
@@ -22,6 +23,14 @@ type VerifyRequest struct {
 	Quote    string `json:"quote"`              // base64-encoded raw quote bytes
 	Type     string `json:"type,omitempty"`     // optional: "sgx", "tdx", "sev-snp", "nvidia-gpu", "tdx-gpu"
 	GPUQuote string `json:"gpuQuote,omitempty"` // base64-encoded NVIDIA GPU evidence (for "tdx-gpu" combined attestation)
+	// EventLog is an optional base64-encoded CC event log (CCEL). When
+	// present on a TDX verification, the log is replayed and the
+	// reconstructed registers must equal the quote's RTMRs; any
+	// mismatch fails the verification. See eventlog.go.
+	EventLog string `json:"eventLog,omitempty"`
+	// IncludeEventLog asks for the parsed per-event digests in the
+	// response (only meaningful together with EventLog).
+	IncludeEventLog bool `json:"includeEventLog,omitempty"`
 }
 
 // VerifyResponse is returned by the verify and error endpoints.
@@ -36,6 +45,14 @@ type VerifyResponse struct {
 	ISVSVN      *uint16  `json:"isvSvn,omitempty"`
 	TcbDate     string   `json:"tcbDate,omitempty"`
 	AdvisoryIDs []string `json:"advisoryIds,omitempty"`
+	// TDX runtime measurement registers (hex), present on successful
+	// TDX verifications.
+	RTMRs []string `json:"rtmrs,omitempty"`
+	// EventLogVerified reports the CCEL cross-check outcome when an
+	// event log was supplied: true means the log replays exactly to
+	// the quote's RTMRs.
+	EventLogVerified *bool          `json:"eventLogVerified,omitempty"`
+	EventLog         []EventSummary `json:"eventLog,omitempty"`
 	// SEV-SNP fields
 	Measurement string `json:"measurement,omitempty"` // SEV-SNP MEASUREMENT (48 bytes hex)
 	HostData    string `json:"hostData,omitempty"`    // SEV-SNP HOST_DATA (32 bytes hex)
@@ -137,7 +154,7 @@ func verifyHandler(w http.ResponseWriter, r *http.Request) {
 	switch qType {
 	case "tdx":
 		verifyTDXTotal.Add(1)
-		verifyTDX(w, quoteRaw, start)
+		verifyTDX(w, quoteRaw, &req, start)
 	case "sgx":
 		verifySGXTotal.Add(1)
 		verifySGX(w, quoteRaw, start)
@@ -151,7 +168,7 @@ func verifyHandler(w http.ResponseWriter, r *http.Request) {
 		verifyTDXTotal.Add(1)
 		verifyNVIDIAGPUTotal.Add(1)
 		verifyTDXGPUTotal.Add(1)
-		verifyTDXGPU(w, quoteRaw, req.GPUQuote, start)
+		verifyTDXGPU(w, quoteRaw, &req, start)
 	default:
 		verifyFailTotal.Add(1)
 		sendJSON(w, 400, VerifyResponse{
@@ -161,8 +178,48 @@ func verifyHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// tdxMeasurements pulls MRTD and the four RTMRs out of a parsed quote.
+func tdxMeasurements(quote interface{}) (mrtd string, rtmrs [][]byte, rtmrHex []string) {
+	q4, ok := quote.(*tdxPb.QuoteV4)
+	if !ok || q4.GetTdQuoteBody() == nil {
+		return "", nil, nil
+	}
+	body := q4.GetTdQuoteBody()
+	mrtd = hex.EncodeToString(body.GetMrTd())
+	for _, r := range body.GetRtmrs() {
+		rtmrs = append(rtmrs, r)
+		rtmrHex = append(rtmrHex, hex.EncodeToString(r))
+	}
+	return mrtd, rtmrs, rtmrHex
+}
+
+// applyEventLogCrossCheck runs the CCEL replay against the quote's
+// RTMRs when the request supplied an event log. It mutates resp with
+// the outcome and returns false when verification must fail.
+func applyEventLogCrossCheck(req *VerifyRequest, quoteRtmrs [][]byte, resp *VerifyResponse) bool {
+	if req.EventLog == "" {
+		return true
+	}
+	logRaw, err := base64.StdEncoding.DecodeString(req.EventLog)
+	if err != nil {
+		resp.Error = "Invalid base64 in 'eventLog' field"
+		return false
+	}
+	events, err := crossCheckEventLog(logRaw, quoteRtmrs)
+	verified := err == nil
+	resp.EventLogVerified = &verified
+	if err != nil {
+		resp.Error = fmt.Sprintf("Event log cross-check failed: %v", err)
+		return false
+	}
+	if req.IncludeEventLog {
+		resp.EventLog = summarizeEvents(events)
+	}
+	return true
+}
+
 // verifyTDX uses google/go-tdx-guest to verify a TDX v4 quote in pure Go.
-func verifyTDX(w http.ResponseWriter, quoteRaw []byte, start time.Time) {
+func verifyTDX(w http.ResponseWriter, quoteRaw []byte, req *VerifyRequest, start time.Time) {
 	// Parse the raw quote into a structured object.
 	quote, err := tdxAbi.QuoteToProto(quoteRaw)
 	if err != nil {
@@ -188,21 +245,30 @@ func verifyTDX(w http.ResponseWriter, quoteRaw []byte, start time.Time) {
 		return
 	}
 
-	// Extract MRTD from TDX report body (offset 184..232 in the raw quote)
-	var mrtd string
-	if len(quoteRaw) >= 232 {
-		mrtd = hex.EncodeToString(quoteRaw[184:232])
-	}
-
-	verifySuccessTotal.Add(1)
-	recordVerifyDuration(time.Since(start))
-	sendJSON(w, 200, VerifyResponse{
+	mrtd, rtmrs, rtmrHex := tdxMeasurements(quote)
+	resp := VerifyResponse{
 		Success: true,
 		Status:  "OK",
 		TeeType: "tdx",
 		MRTD:    mrtd,
+		RTMRs:   rtmrHex,
 		Message: "TDX quote verified (signature + certificate chain)",
-	})
+	}
+	if !applyEventLogCrossCheck(req, rtmrs, &resp) {
+		verifyFailTotal.Add(1)
+		recordVerifyDuration(time.Since(start))
+		resp.Success = false
+		resp.Status = "VERIFICATION_FAILED"
+		sendJSON(w, 200, resp)
+		return
+	}
+	if resp.EventLogVerified != nil && *resp.EventLogVerified {
+		resp.Message = "TDX quote verified (signature + certificate chain); event log replays to attested RTMRs"
+	}
+
+	verifySuccessTotal.Add(1)
+	recordVerifyDuration(time.Since(start))
+	sendJSON(w, 200, resp)
 }
 
 // verifySGX parses and cryptographically verifies an SGX DCAP Quote v3
@@ -260,7 +326,8 @@ func verifySGX(w http.ResponseWriter, quoteRaw []byte, start time.Time) {
 // verifyTDXGPU performs combined Intel TDX + NVIDIA GPU attestation.
 // The TDX quote verifies CPU/memory confidentiality; the GPU evidence
 // (forwarded to NRAS) verifies the GPU is in CC mode.
-func verifyTDXGPU(w http.ResponseWriter, tdxQuoteRaw []byte, gpuQuoteB64 string, start time.Time) {
+func verifyTDXGPU(w http.ResponseWriter, tdxQuoteRaw []byte, req *VerifyRequest, start time.Time) {
+	gpuQuoteB64 := req.GPUQuote
 	// 1. Verify TDX quote
 	quote, err := tdxAbi.QuoteToProto(tdxQuoteRaw)
 	if err != nil {
@@ -285,9 +352,23 @@ func verifyTDXGPU(w http.ResponseWriter, tdxQuoteRaw []byte, gpuQuoteB64 string,
 		return
 	}
 
-	var mrtd string
-	if len(tdxQuoteRaw) >= 232 {
-		mrtd = hex.EncodeToString(tdxQuoteRaw[184:232])
+	mrtd, rtmrs, rtmrHex := tdxMeasurements(quote)
+
+	// 1b. Cross-check the CC event log against the quote's RTMRs.
+	var elResp VerifyResponse
+	if !applyEventLogCrossCheck(req, rtmrs, &elResp) {
+		verifyFailTotal.Add(1)
+		recordVerifyDuration(time.Since(start))
+		sendJSON(w, 200, VerifyResponse{
+			Success:          false,
+			Status:           "VERIFICATION_FAILED",
+			TeeType:          "tdx-gpu",
+			MRTD:             mrtd,
+			RTMRs:            rtmrHex,
+			EventLogVerified: elResp.EventLogVerified,
+			Error:            elResp.Error,
+		})
+		return
 	}
 
 	// 2. Verify NVIDIA GPU evidence (if provided)
@@ -343,12 +424,15 @@ func verifyTDXGPU(w http.ResponseWriter, tdxQuoteRaw []byte, gpuQuoteB64 string,
 	}
 	recordVerifyDuration(time.Since(start))
 	sendJSON(w, 200, VerifyResponse{
-		Success:        overallSuccess,
-		Status:         status,
-		TeeType:        "tdx-gpu",
-		MRTD:           mrtd,
-		GPUAttestation: gpuResult,
-		Message:        msg,
+		Success:          overallSuccess,
+		Status:           status,
+		TeeType:          "tdx-gpu",
+		MRTD:             mrtd,
+		RTMRs:            rtmrHex,
+		EventLogVerified: elResp.EventLogVerified,
+		EventLog:         elResp.EventLog,
+		GPUAttestation:   gpuResult,
+		Message:          msg,
 	})
 }
 
