@@ -125,12 +125,48 @@ Response:
 {
   "success": true,
   "status": "OK",
+  "mrtd": "feb74866...",
+  "rtmrs": ["...", "...", "...", "..."],
   "message": "TDX quote verified (signature + certificate chain)"
 }
 ```
 
-The server auto-detects the quote type (TDX v4 or SGX v3) from the version
-field and routes to the appropriate verifier.
+The server auto-detects the quote type (TDX v4, SGX v3, or SEV-SNP) from
+the version field and routes to the appropriate verifier. Successful TDX
+verifications include the MRTD and the four RTMRs (hex).
+
+### Event-log cross-check (TDX)
+
+A TDX quote proves the final RTMR values but not how they were produced.
+Supplying the CC event log lets the server bind the two: it parses the
+log (TCG crypto-agile format, as read from
+`/sys/firmware/acpi/tables/data/CCEL`), replays every extend
+(`RTMR <- SHA384(RTMR || digest)`), and requires the reconstructed
+registers to equal the quote's RTMRs. Any mismatch fails the
+verification (fail closed), with the offending register and both values
+in the error.
+
+```bash
+curl -X POST https://as.privasys.org/ \
+  -H "Authorization: Bearer <OIDC_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "quote": "<base64 quote>",
+    "eventLog": "<base64 CCEL>",
+    "includeEventLog": true
+  }'
+```
+
+On success the response carries `"eventLogVerified": true` and, when
+`includeEventLog` is set, an `eventLog` array of decoded events
+(`rtmr`, `eventType`, `digest`, and printable payloads such as
+`grub_cmd` lines and the kernel command line). A verified log turns the
+per-event digests into trustworthy fine-grained evidence: combined with
+the per-release `measurements.json` published by
+[cvm-images](https://github.com/Privasys/cvm-images), a verifier can
+pinpoint exactly which boot component (shim, GRUB command, kernel,
+cmdline) changed between two attestations instead of comparing opaque
+register values.
 
 ## Installation guides
 
