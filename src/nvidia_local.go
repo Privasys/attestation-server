@@ -189,9 +189,18 @@ func verifyGPUEvidenceLocal(envelope []byte) *GPUAttestationResult {
 		return fail("GPU report signature: %v", err)
 	}
 
-	// Genuine NVIDIA GPU, CC-ON/PROD, authentic nonce-bound report. Firmware
-	// measurement-matching against a signed RIM is not yet done (see file
-	// header); surface that honestly rather than implying a golden match.
+	// 5. Firmware/VBIOS measurement matching against the pinned NVIDIA RIM golden
+	// values (fail closed: MeasurementsVerified stays false on any gap). Only the
+	// signed report's measurements are trusted here; the golden table was
+	// XML-DSig-verified offline. OCSP revocation of the chain remains a TODO.
+	measurementsVerified, measurementMsg := matchGoldenMeasurements(ev.report)
+
+	msg := "genuine NVIDIA GPU in CC mode; authentic nonce-bound attestation report"
+	if measurementsVerified {
+		msg += "; " + measurementMsg
+	} else {
+		msg += "; firmware RIM match not established (" + measurementMsg + ")"
+	}
 	return &GPUAttestationResult{
 		Verified:             true,
 		Status:               "OK",
@@ -199,8 +208,8 @@ func verifyGPUEvidenceLocal(envelope []byte) *GPUAttestationResult {
 		Driver:               ev.driver,
 		VBIOS:                ev.vbios,
 		CCEnvironment:        "PRODUCTION",
-		MeasurementsVerified: false,
-		Message:              "genuine NVIDIA GPU in CC mode; authentic nonce-bound attestation report (firmware RIM match + OCSP not yet performed)",
+		MeasurementsVerified: measurementsVerified,
+		Message:              msg,
 	}
 }
 

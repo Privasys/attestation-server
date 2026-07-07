@@ -26,9 +26,48 @@ func TestVerifyGPUEvidenceLocal_RealEnvelope(t *testing.T) {
 	if res.CCEnvironment != "PRODUCTION" {
 		t.Fatalf("expected PRODUCTION, got %q", res.CCEnvironment)
 	}
-	// RIM measurement matching is not implemented yet — must be honest.
-	if res.MeasurementsVerified {
-		t.Fatal("MeasurementsVerified must be false until RIM matching lands")
+	// The pinned GH100 golden table (driver 595.71.05 / VBIOS 96.00.cf.00.01)
+	// covers this captured envelope, so firmware measurements must match.
+	if !res.MeasurementsVerified {
+		t.Fatalf("expected MeasurementsVerified true for the pinned driver/VBIOS: %s", res.Message)
+	}
+}
+
+// The runtime SPDM measurements re-derived from the signed report must match the
+// pinned golden table for this GPU's exact driver + VBIOS.
+func TestMatchGoldenMeasurements_RealReport(t *testing.T) {
+	env, err := os.ReadFile("testdata/gpu-evidence-sample.bin")
+	if err != nil {
+		t.Skipf("sample envelope not present: %v", err)
+	}
+	ev, err := parseGPUEvidenceEnvelope(env)
+	if err != nil {
+		t.Fatalf("parse envelope: %v", err)
+	}
+	ok, msg := matchGoldenMeasurements(ev.report)
+	if !ok {
+		t.Fatalf("expected golden match, got: %s", msg)
+	}
+	t.Log(msg)
+}
+
+// Flipping any byte inside the measurement record must break the golden match
+// (a tampered firmware measurement can never pass).
+func TestMatchGoldenMeasurements_TamperFails(t *testing.T) {
+	env, err := os.ReadFile("testdata/gpu-evidence-sample.bin")
+	if err != nil {
+		t.Skipf("sample envelope not present: %v", err)
+	}
+	ev, err := parseGPUEvidenceEnvelope(env)
+	if err != nil {
+		t.Fatalf("parse envelope: %v", err)
+	}
+	tam := append([]byte(nil), ev.report...)
+	// Offset well inside the measurement record (past request(37) + response
+	// header(8) + first block header(4)).
+	tam[spdmRequestLen+8+4+10] ^= 0x01
+	if ok, _ := matchGoldenMeasurements(tam); ok {
+		t.Fatal("tampered measurement record must not match golden")
 	}
 }
 
