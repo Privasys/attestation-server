@@ -23,6 +23,8 @@ func main() {
 		"NVIDIA NRAS endpoint for GPU attestation verification (env: NVIDIA_NRAS_URL)")
 	nvidiaMode := fs.String("nvidia-verify-mode", envOrDefault("NVIDIA_VERIFY_MODE", "local"),
 		"NVIDIA GPU verification mode: local (no external call, default) | nras (env: NVIDIA_VERIFY_MODE)")
+	nvidiaOCSP := fs.String("nvidia-ocsp", envOrDefault("NVIDIA_OCSP_MODE", "off"),
+		"NVIDIA GPU cert-chain OCSP revocation: off (default) | soft (REVOKED fails, responder errors tolerated) | hard (any OCSP failure fails) (env: NVIDIA_OCSP_MODE)")
 	listen := fs.String("listen", envOrDefault("LISTEN_ADDR", ":8080"),
 		"Listen address (env: LISTEN_ADDR)")
 
@@ -55,11 +57,12 @@ func main() {
 		RoleClaim:  *oidcRoleClaim,
 	})
 
-	// Set NVIDIA NRAS URL for GPU attestation verification.
+	// Configure NVIDIA GPU attestation verification.
 	if *nrasURL != "" {
 		nvidiaVerifierURL = *nrasURL
-	nvidiaVerifyMode = *nvidiaMode
 	}
+	nvidiaVerifyMode = *nvidiaMode
+	nvidiaOCSPMode = *nvidiaOCSP
 	if err != nil {
 		logFatal("failed to create OIDC verifier", "error", err)
 	}

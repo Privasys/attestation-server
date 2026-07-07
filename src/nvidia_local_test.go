@@ -8,6 +8,35 @@ import (
 	"testing"
 )
 
+// Live OCSP check of the real captured chain against the NVIDIA responder.
+// Network-gated (set NV_OCSP_LIVE=1) so CI stays offline. The intermediates
+// (GSP BROM, GH100 Provisioner ICA 1, GH100 Identity) should report not-revoked.
+func TestOCSPGPUChain_LiveNotRevoked(t *testing.T) {
+	if os.Getenv("NV_OCSP_LIVE") != "1" {
+		t.Skip("set NV_OCSP_LIVE=1 to run the live NVIDIA OCSP check")
+	}
+	env, err := os.ReadFile("testdata/gpu-evidence-sample.bin")
+	if err != nil {
+		t.Skipf("sample envelope not present: %v", err)
+	}
+	ev, err := parseGPUEvidenceEnvelope(env)
+	if err != nil {
+		t.Fatalf("parse envelope: %v", err)
+	}
+	chain, err := parseGPUCertChain(ev.certChain)
+	if err != nil {
+		t.Fatalf("parse chain: %v", err)
+	}
+	res := ocspCheckGPUChain(chain)
+	if res.revoked {
+		t.Fatalf("chain reported revoked: %s", res.reason)
+	}
+	if res.warning != "" {
+		t.Logf("OCSP warnings (non-fatal): %s", res.warning)
+	}
+	t.Logf("OCSP checked=%v revoked=%v", res.checked, res.revoked)
+}
+
 // A real GPU CC evidence envelope captured from m5-dev-ai (H100, driver
 // 595.71.05) must verify: genuine NVIDIA GPU, CC PRODUCTION/ON, authentic
 // nonce-bound SPDM report, chain rooted at the pinned NVIDIA Device Identity CA.

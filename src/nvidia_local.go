@@ -189,6 +189,23 @@ func verifyGPUEvidenceLocal(envelope []byte) *GPUAttestationResult {
 		return fail("GPU report signature: %v", err)
 	}
 
+	// 4b. OCSP revocation of the cert chain intermediates (off by default). A
+	// definitive REVOKED always fails; responder/parse errors fail only in hard
+	// mode, otherwise they are recorded as a soft-fail warning.
+	var ocspWarning string
+	if nvidiaOCSPMode != "off" {
+		oc := ocspCheckGPUChain(chain)
+		if oc.revoked {
+			return fail("GPU cert chain revoked: %s", oc.reason)
+		}
+		if oc.warning != "" {
+			if nvidiaOCSPMode == "hard" {
+				return fail("GPU cert chain OCSP check failed: %s", oc.warning)
+			}
+			ocspWarning = "OCSP soft-fail: " + oc.warning
+		}
+	}
+
 	// 5. Firmware/VBIOS measurement matching against the pinned NVIDIA RIM golden
 	// values (fail closed: MeasurementsVerified stays false on any gap). Only the
 	// signed report's measurements are trusted here; the golden table was
@@ -200,6 +217,9 @@ func verifyGPUEvidenceLocal(envelope []byte) *GPUAttestationResult {
 		msg += "; " + measurementMsg
 	} else {
 		msg += "; firmware RIM match not established (" + measurementMsg + ")"
+	}
+	if ocspWarning != "" {
+		msg += "; " + ocspWarning
 	}
 	return &GPUAttestationResult{
 		Verified:             true,
