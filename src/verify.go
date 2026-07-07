@@ -69,6 +69,16 @@ type GPUAttestationResult struct {
 	Status   string `json:"status,omitempty"`
 	Message  string `json:"message,omitempty"`
 	Error    string `json:"error,omitempty"`
+	// Populated by the local NVIDIA verifier (verifyGPUEvidenceLocal).
+	GPUUUID       string `json:"gpuUuid,omitempty"`
+	Driver        string `json:"driver,omitempty"`
+	VBIOS         string `json:"vbios,omitempty"`
+	CCEnvironment string `json:"ccEnvironment,omitempty"`
+	// MeasurementsVerified is true only once firmware/VBIOS measurements are
+	// matched against a signed NVIDIA RIM (not yet implemented — see
+	// nvidia_local.go). Verified can be true (genuine GPU, authentic report)
+	// while this is false.
+	MeasurementsVerified bool `json:"measurementsVerified"`
 }
 
 // quoteType auto-detects the attestation evidence type from raw bytes.
@@ -386,20 +396,7 @@ func verifyTDXGPU(w http.ResponseWriter, tdxQuoteRaw []byte, req *VerifyRequest,
 			return
 		}
 
-		msg, gpuErr := forwardToNRAS(nvidiaVerifierURL, gpuEvidence)
-		if gpuErr != nil {
-			gpuResult = &GPUAttestationResult{
-				Verified: false,
-				Status:   "VERIFICATION_FAILED",
-				Error:    gpuErr.Error(),
-			}
-		} else {
-			gpuResult = &GPUAttestationResult{
-				Verified: true,
-				Status:   "OK",
-				Message:  msg,
-			}
-		}
+		gpuResult = verifyGPUEvidence(gpuEvidence)
 	}
 
 	// Overall success requires TDX pass. GPU failure is reported but

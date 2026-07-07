@@ -22,39 +22,36 @@ var nvidiaVerifierURL string
 // sent with an explicit "type":"nvidia-gpu" in the request because the
 // binary format is not auto-detectable from Intel/AMD quote headers.
 func verifyNVIDIAGPU(w http.ResponseWriter, evidence []byte, start time.Time) {
-	url := nvidiaVerifierURL
-	if url == "" {
-		url = os.Getenv("NVIDIA_NRAS_URL")
-	}
-	if url == "" {
+	// Local verification (default) needs no NRAS URL; NRAS mode does.
+	if nvidiaVerifyMode == "nras" && nvidiaVerifierURL == "" && os.Getenv("NVIDIA_NRAS_URL") == "" {
 		verifyFailTotal.Add(1)
 		sendJSON(w, 400, VerifyResponse{
 			Success: false,
-			Error:   "NVIDIA GPU attestation not configured (set --nvidia-nras-url or NVIDIA_NRAS_URL)",
+			Error:   "NVIDIA GPU NRAS mode not configured (set --nvidia-nras-url or NVIDIA_NRAS_URL, or use --nvidia-verify-mode local)",
 		})
 		return
 	}
 
-	result, err := forwardToNRAS(url, evidence)
-	if err != nil {
-		verifyFailTotal.Add(1)
-		recordVerifyDuration(time.Since(start))
-		sendJSON(w, 200, VerifyResponse{
-			Success: false,
-			Status:  "VERIFICATION_FAILED",
-			TeeType: "nvidia-gpu",
-			Error:   fmt.Sprintf("NVIDIA GPU verification failed: %v", err),
-		})
-		return
-	}
-
-	verifySuccessTotal.Add(1)
+	result := verifyGPUEvidence(evidence)
 	recordVerifyDuration(time.Since(start))
+	if !result.Verified {
+		verifyFailTotal.Add(1)
+		sendJSON(w, 200, VerifyResponse{
+			Success:        false,
+			Status:         "VERIFICATION_FAILED",
+			TeeType:        "nvidia-gpu",
+			GPUAttestation: result,
+			Error:          result.Error,
+		})
+		return
+	}
+	verifySuccessTotal.Add(1)
 	sendJSON(w, 200, VerifyResponse{
-		Success: true,
-		Status:  "OK",
-		TeeType: "nvidia-gpu",
-		Message: result,
+		Success:        true,
+		Status:         "OK",
+		TeeType:        "nvidia-gpu",
+		GPUAttestation: result,
+		Message:        result.Message,
 	})
 }
 
