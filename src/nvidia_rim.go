@@ -41,7 +41,7 @@ type goldenTable struct {
 }
 
 // goldenTables is the registry of pinned golden sets, looked up by driver+VBIOS.
-var goldenTables = []*goldenTable{&goldenGH100}
+var goldenTables = []*goldenTable{&goldenGH100, &goldenGH100vbiosD9}
 
 // SPDM GET_MEASUREMENTS request length prepended to the NVML attestation report.
 const spdmRequestLen = 37
