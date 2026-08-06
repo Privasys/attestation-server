@@ -22,6 +22,14 @@ sudo apt install -y git nodejs npm cracklib-runtime openssl \
 
 ## 3. Install Intel PCCS (from source)
 
+> **Note (2026-08):** a local PCCS is optional. Production Privasys deployments
+> skip this step entirely and point the QPL straight at Intel PCS API v4 -- see
+> [bootstrap-production.sh](bootstrap-production.sh), which is the install path
+> of record for `as.privasys.org`. If you do run a PCCS, use **version 1.27 or
+> later**: Intel PCS API v3 has reached end of life, and older PCCS releases
+> still call it (they serve stale v3 collateral until it expires, then return
+> `410 GONE`).
+
 The official Debian package has a known issue
 ([intel/confidential-computing.tee.dcap.pccs#37](https://github.com/intel/confidential-computing.tee.dcap.pccs/issues/37)),
 so build from the standalone repository instead.
