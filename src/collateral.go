@@ -58,9 +58,22 @@ var (
 	collateralGetter     httpsGetter
 )
 
+// collateralFetchTimeout bounds a single PCS fetch on the verify path. It is kept
+// short (the SGX verify path is on the RA-TLS handshake critical path) so a hung PCS
+// on a cache miss adds at most this much latency; the 24h cache makes the steady state
+// a fast cache hit. Overridable via SGX_TCB_FETCH_TIMEOUT_SECONDS.
+var collateralFetchTimeout = func() time.Duration {
+	if v := os.Getenv("SGX_TCB_FETCH_TIMEOUT_SECONDS"); v != "" {
+		if s, err := strconv.Atoi(v); err == nil && s > 0 {
+			return time.Duration(s) * time.Second
+		}
+	}
+	return 5 * time.Second
+}()
+
 func getCollateralGetter() httpsGetter {
 	collateralGetterOnce.Do(func() {
-		collateralGetter = newCachingGetter(newNetGetter(15*time.Second), tcbGraceWindow)
+		collateralGetter = newCachingGetter(newNetGetter(collateralFetchTimeout), tcbGraceWindow)
 	})
 	return collateralGetter
 }
