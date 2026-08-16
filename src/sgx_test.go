@@ -8,8 +8,10 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/pem"
 	"math/big"
+	"os"
 	"testing"
 	"time"
 )
@@ -398,6 +400,36 @@ func TestVerifyCertChain_ForeignRootRejected(t *testing.T) {
 	}
 	if err := q.VerifyCertChain(); err == nil {
 		t.Fatal("VerifyCertChain() accepted a chain not anchored to the Intel SGX Root CA")
+	}
+}
+
+// TestVerifyAll_RealProdVaultQuote replays a REAL production SGX quote captured
+// from the prod vault constellation (Paris 141.94.219.130:8549, MRENCLAVE
+// cbecd75e…ec407 = vault-v0.29.0). It is the regression guard the synthetic
+// buildMinimalQuote tests cannot be: it must still fully verify under the
+// Intel-root-pinning + non-debug hardening (fixture: testdata/prod-vault-sgx.quote,
+// captured 2026-08-16 via ra-tls-clients quotedump). A genuine quote chains to
+// the pinned Intel SGX Root CA and is production-signed (non-debug), so VerifyAll
+// must pass — if this ever fails, the hardening rejects real quotes.
+func TestVerifyAll_RealProdVaultQuote(t *testing.T) {
+	const wantMRENCLAVE = "cbecd75e3a4ab742b6d8f85848d96a5058a4674a820b41928116cec4916ec407"
+
+	raw, err := os.ReadFile("testdata/prod-vault-sgx.quote")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	q, err := ParseSGXQuote(raw)
+	if err != nil {
+		t.Fatalf("parse real prod quote: %v", err)
+	}
+	if q.IsDebug() {
+		t.Fatal("real prod vault enclave reports DEBUG — reject-debug would break prod")
+	}
+	if err := q.VerifyAll(); err != nil {
+		t.Fatalf("VerifyAll on real prod quote failed (hardening rejects genuine quotes): %v", err)
+	}
+	if got := hex.EncodeToString(q.MRENCLAVE()); got != wantMRENCLAVE {
+		t.Fatalf("MRENCLAVE = %s, want %s", got, wantMRENCLAVE)
 	}
 }
 
