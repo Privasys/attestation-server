@@ -329,7 +329,7 @@ func verifySGX(w http.ResponseWriter, quoteRaw []byte, start time.Time) {
 		MRSigner:  hex.EncodeToString(quote.MRSIGNER()),
 		ISVProdID: &prodID,
 		ISVSVN:    &svn,
-		Message:   "SGX DCAP Quote v3 verified (signature + attestation key binding + certificate chain)",
+		Message:   "SGX DCAP Quote v3 verified (signature + attestation key binding + certificate chain pinned to Intel SGX Root CA + non-debug)",
 	})
 }
 

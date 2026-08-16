@@ -341,6 +341,66 @@ func buildMinimalQuote(t *testing.T) []byte {
 	return quote
 }
 
+// ---------------------------------------------------------------------------
+//  Intel SGX Root CA pinning + debug + foreign-root rejection (sgx.fail hardening)
+// ---------------------------------------------------------------------------
+
+func TestIntelSGXRootCA_Pinned(t *testing.T) {
+	if intelSGXRootCA == nil {
+		t.Fatal("intelSGXRootCA is nil (init failed to parse the pinned root)")
+	}
+	if intelSGXRootCA.Subject.CommonName != "Intel SGX Root CA" {
+		t.Fatalf("pinned root CN = %q, want \"Intel SGX Root CA\"", intelSGXRootCA.Subject.CommonName)
+	}
+	// The DER fingerprint must match the asserted constant (init would have
+	// panicked otherwise, but assert here too as an explicit regression guard).
+	got := ""
+	for _, b := range sha256Sum(intelSGXRootCA.Raw) {
+		got += string("0123456789abcdef"[b>>4]) + string("0123456789abcdef"[b&0xf])
+	}
+	if got != intelSGXRootCAFingerprint {
+		t.Fatalf("pinned root fingerprint = %s, want %s", got, intelSGXRootCAFingerprint)
+	}
+}
+
+func TestVerifyNotDebug(t *testing.T) {
+	q, err := ParseSGXQuote(buildMinimalQuote(t))
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+
+	// The minimal quote has ATTRIBUTES all-zero → not debug.
+	if q.IsDebug() {
+		t.Fatal("fresh minimal quote reports IsDebug() = true, want false")
+	}
+	if err := q.VerifyNotDebug(); err != nil {
+		t.Fatalf("VerifyNotDebug() on non-debug quote: %v", err)
+	}
+
+	// Flip ATTRIBUTES flags bit 1 (DEBUG). ATTRIBUTES is at offset 48 in the
+	// 384-byte report body; its first byte holds the flags.
+	q.ReportBody[48] |= 0x02
+	if !q.IsDebug() {
+		t.Fatal("after setting DEBUG bit, IsDebug() = false, want true")
+	}
+	if err := q.VerifyNotDebug(); err == nil && !sgxAllowDebug {
+		t.Fatal("VerifyNotDebug() accepted a DEBUG enclave (SGX_ALLOW_DEBUG unset)")
+	}
+}
+
+func TestVerifyCertChain_ForeignRootRejected(t *testing.T) {
+	// The minimal quote carries a self-signed "Intel SGX PCK Certificate" that
+	// is NOT anchored to the genuine Intel root. VerifyCertChain must reject it
+	// (previously it trusted the quote's own root — a full attestation bypass).
+	q, err := ParseSGXQuote(buildMinimalQuote(t))
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+	if err := q.VerifyCertChain(); err == nil {
+		t.Fatal("VerifyCertChain() accepted a chain not anchored to the Intel SGX Root CA")
+	}
+}
+
 func TestParseSGXQuote_Valid(t *testing.T) {
 	raw := buildMinimalQuote(t)
 	q, err := ParseSGXQuote(raw)

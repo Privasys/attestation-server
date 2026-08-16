@@ -172,6 +172,9 @@ func (q *SGXQuote) VerifyAll() error {
 	if err := q.VerifyCertChain(); err != nil {
 		return fmt.Errorf("step 4 (certificate chain): %w", err)
 	}
+	if err := q.VerifyNotDebug(); err != nil {
+		return fmt.Errorf("step 5 (debug attribute): %w", err)
+	}
 	return nil
 }
 
@@ -260,22 +263,47 @@ func (q *SGXQuote) VerifyCertChain() error {
 		return fmt.Errorf("certificate chain has %d cert(s), need >= 2", len(certs))
 	}
 
-	// Last cert = root (self-signed), middle = intermediates
+	// PIN to the genuine Intel SGX Root CA. The chain MUST anchor to Intel's
+	// root, never to whatever self-signed cert the quote itself carries as its
+	// last cert (that let a fully fabricated chain pass — a complete attestation
+	// bypass). Reject up front if the quote's own root is not Intel's.
+	if !certs[len(certs)-1].Equal(intelSGXRootCA) {
+		return fmt.Errorf("quote certificate chain does not anchor to the Intel SGX Root CA")
+	}
 	roots := x509.NewCertPool()
-	roots.AddCert(certs[len(certs)-1])
+	roots.AddCert(intelSGXRootCA)
 
 	intermediates := x509.NewCertPool()
 	for i := 1; i < len(certs)-1; i++ {
 		intermediates.AddCert(certs[i])
 	}
 
-	_, err = certs[0].Verify(x509.VerifyOptions{
+	// certs[0] (the PCK leaf) must chain to the pinned Intel root through the
+	// quote's intermediate(s).
+	if _, err = certs[0].Verify(x509.VerifyOptions{
 		Roots:         roots,
 		Intermediates: intermediates,
 		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
-	})
-	if err != nil {
-		return fmt.Errorf("x509 chain verification: %w", err)
+	}); err != nil {
+		return fmt.Errorf("x509 chain verification against Intel SGX Root CA: %w", err)
+	}
+	return nil
+}
+
+// Attributes returns the 16-byte ATTRIBUTES field (flags ‖ xfrm) of the ISV
+// enclave report body.
+func (q *SGXQuote) Attributes() []byte { return q.ReportBody[48:64] }
+
+// IsDebug reports whether the enclave's DEBUG attribute (flags bit 1) is set. A
+// debug enclave's memory can be read and modified by the host, so its quote must
+// not be trusted for production secrets.
+func (q *SGXQuote) IsDebug() bool { return q.ReportBody[48]&0x02 != 0 }
+
+// VerifyNotDebug fails when the enclave is DEBUG-flagged (unless SGX_ALLOW_DEBUG
+// is set for a deployment that knowingly runs debug enclaves).
+func (q *SGXQuote) VerifyNotDebug() error {
+	if q.IsDebug() && !sgxAllowDebug {
+		return fmt.Errorf("enclave is DEBUG-mode (ATTRIBUTES flags bit 1 set); refusing (host can read/modify a debug enclave's memory)")
 	}
 	return nil
 }
