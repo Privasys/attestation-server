@@ -21,13 +21,23 @@ type TCBStatus = pcs.TcbComponentStatus
 // getMatchingTcbLevel (the reference) minus the TDX-only component comparison — the
 // SGX quote has no TEE TCB SVN.
 func matchSGXTCBStatus(tcbInfo pcs.TcbInfo, ext *pcs.PckExtensions) (TCBStatus, error) {
+	lvl, err := matchSGXTCBLevel(tcbInfo, ext)
+	if err != nil {
+		return "", err
+	}
+	return lvl.TcbStatus, nil
+}
+
+// matchSGXTCBLevel returns the full matching TCB level (status + tcbDate + advisory IDs),
+// used by the verify path to populate the response. See matchSGXTCBStatus for the rule.
+func matchSGXTCBLevel(tcbInfo pcs.TcbInfo, ext *pcs.PckExtensions) (pcs.TcbLevel, error) {
 	cpu := ext.TCB.CPUSvnComponents
 	for _, lvl := range tcbInfo.TcbLevels {
 		if sgxComponentsGE(cpu, lvl.Tcb.SgxTcbcomponents) && ext.TCB.PCESvn >= lvl.Tcb.Pcesvn {
-			return lvl.TcbStatus, nil
+			return lvl, nil
 		}
 	}
-	return "", fmt.Errorf("no TCB level in Intel TCB info matches the platform PCK certificate")
+	return pcs.TcbLevel{}, fmt.Errorf("no TCB level in Intel TCB info matches the platform PCK certificate")
 }
 
 // sgxComponentsGE reports whether every one of the PCK certificate's 16 SGX CPU-SVN

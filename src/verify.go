@@ -45,6 +45,10 @@ type VerifyResponse struct {
 	ISVSVN      *uint16  `json:"isvSvn,omitempty"`
 	TcbDate     string   `json:"tcbDate,omitempty"`
 	AdvisoryIDs []string `json:"advisoryIds,omitempty"`
+	// TCBStatus is the platform TCB status derived from Intel PCS collateral
+	// (UpToDate, SWHardeningNeeded, ConfigurationAndSWHardeningNeeded, …), present
+	// when SGX_TCB_MODE is report/enforce and collateral was obtained.
+	TCBStatus string `json:"tcbStatus,omitempty"`
 	// TDX runtime measurement registers (hex), present on successful
 	// TDX verifications.
 	RTMRs []string `json:"rtmrs,omitempty"`
@@ -319,9 +323,7 @@ func verifySGX(w http.ResponseWriter, quoteRaw []byte, start time.Time) {
 		"mrsigner", hex.EncodeToString(quote.MRSIGNER()),
 	)
 
-	verifySuccessTotal.Add(1)
-	recordVerifyDuration(time.Since(start))
-	sendJSON(w, 200, VerifyResponse{
+	resp := VerifyResponse{
 		Success:   true,
 		Status:    "OK",
 		TeeType:   "sgx",
@@ -330,7 +332,66 @@ func verifySGX(w http.ResponseWriter, quoteRaw []byte, start time.Time) {
 		ISVProdID: &prodID,
 		ISVSVN:    &svn,
 		Message:   "SGX DCAP Quote v3 verified (signature + attestation key binding + certificate chain pinned to Intel SGX Root CA + non-debug)",
-	})
+	}
+
+	// SGX_TCB_MODE report/enforce: derive the platform TCB status from Intel PCS
+	// collateral. report never rejects (observability); enforce additionally applies
+	// the secure floor. Off (default) skips the PCS round-trip entirely.
+	if sgxTCBMode != "off" {
+		certs, cerr := parsePEMChain(quote.QECertData)
+		if cerr != nil {
+			cerr = fmt.Errorf("parse PCK chain for TCB: %w", cerr)
+		}
+		var tcb sgxTCBResult
+		if cerr == nil {
+			tcb, cerr = deriveSGXTCB(certs, getCollateralGetter())
+		}
+		if cerr != nil {
+			// Collateral unavailable/invalid.
+			if sgxTCBMode == "enforce" {
+				logWarn("sgx tcb check failed (enforce)", "error", cerr)
+				verifyFailTotal.Add(1)
+				recordVerifyDuration(time.Since(start))
+				sendJSON(w, 200, VerifyResponse{
+					Success: false,
+					Status:  "VERIFICATION_FAILED",
+					Error:   fmt.Sprintf("SGX TCB check failed: %v", cerr),
+				})
+				return
+			}
+			logWarn("sgx tcb check error (report-only, not rejecting)", "error", cerr)
+		} else {
+			resp.TCBStatus = string(tcb.Status)
+			if resp.TcbDate == "" {
+				resp.TcbDate = tcb.TcbDate
+			}
+			if len(resp.AdvisoryIDs) == 0 {
+				resp.AdvisoryIDs = tcb.AdvisoryIDs
+			}
+			logInfo("sgx tcb status derived", "tcb_status", string(tcb.Status), "mode", sgxTCBMode)
+			if sgxTCBMode == "enforce" {
+				// Per-measurement policy relaxation is not plumbed yet, so enforce uses
+				// the secure floor only. Revoked is always rejected.
+				if aerr := tcbAcceptable(tcb.Status, nil); aerr != nil {
+					logWarn("sgx tcb status rejected (enforce)", "tcb_status", string(tcb.Status), "error", aerr)
+					verifyFailTotal.Add(1)
+					recordVerifyDuration(time.Since(start))
+					sendJSON(w, 200, VerifyResponse{
+						Success:   false,
+						Status:    "VERIFICATION_FAILED",
+						TeeType:   "sgx",
+						TCBStatus: string(tcb.Status),
+						Error:     fmt.Sprintf("SGX TCB status not acceptable: %v", aerr),
+					})
+					return
+				}
+			}
+		}
+	}
+
+	verifySuccessTotal.Add(1)
+	recordVerifyDuration(time.Since(start))
+	sendJSON(w, 200, resp)
 }
 
 // verifyTDXGPU performs combined Intel TDX + NVIDIA GPU attestation.

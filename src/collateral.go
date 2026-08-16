@@ -12,12 +12,114 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	tdxAbi "github.com/google/go-tdx-guest/abi"
 	"github.com/google/go-tdx-guest/pcs"
 )
+
+// sgxTCBMode controls SGX TCB/collateral checking, set from SGX_TCB_MODE:
+//   - "off"     (default): no collateral fetch; verification unchanged from Phase 1.
+//     Chosen as the default so deploying this code changes NOTHING until explicitly
+//     enabled (and avoids adding a PCS round-trip to every verify unasked).
+//   - "report":  derive + report the TCB status (and QE-identity / CRL checks) but
+//     NEVER reject on them — observability before enforcement.
+//   - "enforce": additionally reject when the status fails the secure floor (and,
+//     once plumbed, the per-measurement policy). See the ConfigurationAndSWHardeningNeeded
+//     finding: do not enable enforce in prod until prod measurements' policy accepts it.
+var sgxTCBMode = func() string {
+	m := strings.ToLower(strings.TrimSpace(os.Getenv("SGX_TCB_MODE")))
+	switch m {
+	case "report", "enforce":
+		return m
+	default:
+		return "off"
+	}
+}()
+
+// tcbGraceWindow is the collateral cache grace window (SGX_TCB_GRACE_HOURS, default 24h):
+// how long cached collateral is served through a PCS outage. 0 == strict fail-closed.
+var tcbGraceWindow = func() time.Duration {
+	if v := os.Getenv("SGX_TCB_GRACE_HOURS"); v != "" {
+		if h, err := strconv.Atoi(v); err == nil && h >= 0 {
+			return time.Duration(h) * time.Hour
+		}
+	}
+	return 24 * time.Hour
+}()
+
+// collateralGetter is the process-wide caching PCS getter, initialised once.
+var (
+	collateralGetterOnce sync.Once
+	collateralGetter     httpsGetter
+)
+
+func getCollateralGetter() httpsGetter {
+	collateralGetterOnce.Do(func() {
+		collateralGetter = newCachingGetter(newNetGetter(15*time.Second), tcbGraceWindow)
+	})
+	return collateralGetter
+}
+
+// sgxTCBResult is the outcome of the SGX collateral/TCB checks for a quote.
+type sgxTCBResult struct {
+	Status      TCBStatus
+	TcbDate     string
+	AdvisoryIDs []string
+}
+
+// deriveSGXTCB fetches and verifies SGX collateral for a quote's PCK chain and derives
+// the platform TCB status, plus a QE-identity presence check and a PCK-CRL non-revocation
+// check on the leaf. All signatures are verified against the pinned Intel root inside the
+// fetch functions. Returns an error if collateral cannot be obtained/verified or the leaf
+// is revoked; the caller decides (report vs enforce) what to do with it.
+func deriveSGXTCB(certs []*x509.Certificate, getter httpsGetter) (sgxTCBResult, error) {
+	var res sgxTCBResult
+	if len(certs) < 2 {
+		return res, fmt.Errorf("PCK chain too short for collateral checks")
+	}
+	pckLeaf := certs[0]
+	ext, err := pcs.PckCertificateExtensions(pckLeaf)
+	if err != nil {
+		return res, fmt.Errorf("parse PCK extensions: %w", err)
+	}
+
+	tcbInfo, err := fetchSGXTcbInfo(ext.FMSPC, getter)
+	if err != nil {
+		return res, err
+	}
+	if tcbInfo.Fmspc != ext.FMSPC {
+		return res, fmt.Errorf("TCB info FMSPC %q != PCK cert FMSPC %q", tcbInfo.Fmspc, ext.FMSPC)
+	}
+	lvl, err := matchSGXTCBLevel(tcbInfo, ext)
+	if err != nil {
+		return res, err
+	}
+	res.Status = lvl.TcbStatus
+	res.TcbDate = lvl.TcbDate
+	res.AdvisoryIDs = lvl.AdvisoryIDs
+
+	// PCK CRL: reject a revoked leaf regardless of mode (revocation is not a TCB-status
+	// policy knob).
+	ca := "processor"
+	if strings.Contains(certs[1].Subject.CommonName, "Platform") {
+		ca = "platform"
+	}
+	crl, err := fetchSGXPckCrl(ca, getter)
+	if err != nil {
+		return res, fmt.Errorf("PCK CRL: %w", err)
+	}
+	for _, rc := range crl.RevokedCertificateEntries {
+		if rc.SerialNumber.Cmp(pckLeaf.SerialNumber) == 0 {
+			return res, fmt.Errorf("PCK leaf certificate is revoked")
+		}
+	}
+	return res, nil
+}
 
 // Intel PCS API v4 SGX endpoints. Production talks to PCS directly (no local PCCS).
 // NOTE: go-tdx-guest's pcs.TcbInfoURL/QeIdentityURL hardcode the TDX base, so the SGX
