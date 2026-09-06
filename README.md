@@ -127,6 +127,12 @@ Response:
   "status": "OK",
   "mrtd": "feb74866...",
   "rtmrs": ["...", "...", "...", "..."],
+  "platform": {
+    "ppid": "414afbe506e8ac361add41f3133aab6f",
+    "platformInstanceId": "c055fc7b49bd4185dda796bf1795af32",
+    "fmspc": "00806f050000"
+  },
+  "pckRevocationChecked": true,
   "message": "TDX quote verified (signature + certificate chain)"
 }
 ```
@@ -134,6 +140,39 @@ Response:
 The server auto-detects the quote type (TDX v4, SGX v3, or SEV-SNP) from
 the version field and routes to the appropriate verifier. Successful TDX
 verifications include the MRTD and the four RTMRs (hex).
+
+### Revocation
+
+The PCK certificate chain of every SGX and TDX quote is checked against Intel's
+current CRLs: the PCK CRL of the issuing CA (Processor or Platform) for the
+leaf, and the Root CA CRL for the issuing CA itself. A revoked certificate, or
+a CRL that cannot be obtained or has expired, fails the verification
+(`PCK_REVOCATION_MODE=enforce`, the default); `report` only records the
+outcome in `pckRevocationChecked` and logs it; `off` skips the check. CRLs are
+served through the same caching PCS getter as the TCB collateral, with the
+24-hour grace window (`SGX_TCB_GRACE_HOURS`) through a PCS outage. This check
+is independent of the TCB-status policy (`SGX_TCB_MODE`).
+
+### Platform allow-list
+
+A quote that verifies proves that a genuine TEE with the reported measurements
+signed it, not which machine it came from. The `platform` object reports the
+hardware identity read from the verified evidence: for Intel SGX and TDX the
+PCK certificate's PPID and, on certificates issued by the PCK Platform CA, its
+Platform Instance ID (SGX extension `1.2.840.113741.1.13.1.6`); for AMD
+SEV-SNP the report's `chipId`. A relying party that knows which machines it
+operates sends an allow-list with the request:
+
+```json
+{"quote": "<base64 quote>", "allowedPlatformIds": ["c055fc7b49bd4185dda796bf1795af32"]}
+```
+
+Entries are hex (case and separators ignored) and are matched against the
+Platform Instance ID when present, else the PPID, else the CHIP_ID. Evidence
+from any other platform fails with `"status": "PLATFORM_NOT_ALLOWED"`; so does
+evidence whose platform identity cannot be read when a list is given. The
+`ra-tls-clients` SDKs send the list from `VerificationPolicy.AllowedPlatformIDs`
+and check the reported identity themselves as well.
 
 ### Event-log cross-check (TDX)
 

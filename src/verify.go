@@ -31,6 +31,12 @@ type VerifyRequest struct {
 	// IncludeEventLog asks for the parsed per-event digests in the
 	// response (only meaningful together with EventLog).
 	IncludeEventLog bool `json:"includeEventLog,omitempty"`
+	// AllowedPlatformIds is an optional relying-party allow-list of hardware
+	// platform identifiers (hex): the PCK certificate's Platform Instance ID,
+	// or its PPID when the certificate carries no instance id, or the SEV-SNP
+	// CHIP_ID. When non-empty the evidence must come from one of them, else
+	// the verification fails with status PLATFORM_NOT_ALLOWED. See platform.go.
+	AllowedPlatformIds []string `json:"allowedPlatformIds,omitempty"`
 }
 
 // VerifyResponse is returned by the verify and error endpoints.
@@ -63,8 +69,76 @@ type VerifyResponse struct {
 	ReportID    string `json:"reportId,omitempty"`    // SEV-SNP REPORT_ID (32 bytes hex)
 	// GPU attestation (for combined tdx-gpu / sev-snp-gpu attestation)
 	GPUAttestation *GPUAttestationResult `json:"gpuAttestation,omitempty"`
-	Message        string                `json:"message,omitempty"`
-	Error          string                `json:"error,omitempty"`
+	// Platform is the hardware identity read from the verified evidence (the
+	// PCK certificate's SGX extension, or the SEV-SNP CHIP_ID), present on
+	// every verification that reached the evidence, so a relying party can pin
+	// the machines it operates (VerifyRequest.AllowedPlatformIds).
+	Platform *PlatformIdentity `json:"platform,omitempty"`
+	// PckRevocationChecked reports the outcome of the PCK revocation check
+	// (revocation.go): true when the leaf and its issuing CA were checked against
+	// Intel's current CRLs and are not revoked; false when the check failed or
+	// found a revocation (rejected in enforce mode); absent when the check is off.
+	PckRevocationChecked *bool  `json:"pckRevocationChecked,omitempty"`
+	Message              string `json:"message,omitempty"`
+	Error                string `json:"error,omitempty"`
+}
+
+// tdxPckChain is the PEM PCK certificate chain embedded in a parsed TDX quote.
+func tdxPckChain(quote interface{}) []byte {
+	q4, ok := quote.(*tdxPb.QuoteV4)
+	if !ok {
+		return nil
+	}
+	return q4.GetSignedData().GetCertificationData().GetQeReportCertificationData().GetPckCertificateChainData().GetPckCertChain()
+}
+
+// parseTDXForTest returns the PEM PCK chain of a raw TDX quote (tests).
+func parseTDXForTest(raw []byte) ([]byte, error) {
+	quote, err := tdxAbi.QuoteToProto(raw)
+	if err != nil {
+		return nil, err
+	}
+	chain := tdxPckChain(quote)
+	if len(chain) == 0 {
+		return nil, fmt.Errorf("no PCK chain in quote")
+	}
+	return chain, nil
+}
+
+// applyPlatformPolicy records the evidence's platform identity in resp and
+// enforces the request's allow-list. Returns false, with resp turned into a
+// PLATFORM_NOT_ALLOWED failure, when the platform is not allowed or, with a
+// non-empty list, when no identity could be read (fail closed). Without an
+// allow-list an unreadable identity is only logged.
+func applyPlatformPolicy(req *VerifyRequest, identity *PlatformIdentity, readErr error, resp *VerifyResponse) bool {
+	resp.Platform = identity
+	if readErr != nil {
+		if len(req.AllowedPlatformIds) == 0 {
+			logWarn("platform identity unavailable", "error", readErr)
+			return true
+		}
+		resp.Success = false
+		resp.Status = "PLATFORM_NOT_ALLOWED"
+		resp.Error = fmt.Sprintf("platform allow-list: %v", readErr)
+		return false
+	}
+	if err := platformAllowed(identity, req.AllowedPlatformIds); err != nil {
+		logWarn("platform not allowed", "platform", identity.ID(), "error", err)
+		resp.Success = false
+		resp.Status = "PLATFORM_NOT_ALLOWED"
+		resp.Error = err.Error()
+		return false
+	}
+	return true
+}
+
+// tdxPlatformIdentity reads the PCK leaf embedded in a parsed TDX quote.
+func tdxPlatformIdentity(quote interface{}) (*PlatformIdentity, error) {
+	chain := tdxPckChain(quote)
+	if len(chain) == 0 {
+		return nil, fmt.Errorf("TDX quote carries no PCK certificate chain")
+	}
+	return platformIdentityFromChain(chain)
 }
 
 // GPUAttestationResult holds the result of NVIDIA GPU attestation.
@@ -171,10 +245,10 @@ func verifyHandler(w http.ResponseWriter, r *http.Request) {
 		verifyTDX(w, quoteRaw, &req, start)
 	case "sgx":
 		verifySGXTotal.Add(1)
-		verifySGX(w, quoteRaw, start)
+		verifySGX(w, quoteRaw, &req, start)
 	case "sev-snp":
 		verifySEVSNPTotal.Add(1)
-		verifySEVSNP(w, quoteRaw, start)
+		verifySEVSNP(w, quoteRaw, &req, start)
 	case "nvidia-gpu":
 		verifyNVIDIAGPUTotal.Add(1)
 		verifyNVIDIAGPU(w, quoteRaw, start)
@@ -268,6 +342,13 @@ func verifyTDX(w http.ResponseWriter, quoteRaw []byte, req *VerifyRequest, start
 		RTMRs:   rtmrHex,
 		Message: "TDX quote verified (signature + certificate chain)",
 	}
+	identity, ierr := tdxPlatformIdentity(quote)
+	if !applyPlatformPolicy(req, identity, ierr, &resp) || !applyRevocationPolicy(tdxPckChain(quote), &resp) {
+		verifyFailTotal.Add(1)
+		recordVerifyDuration(time.Since(start))
+		sendJSON(w, 200, resp)
+		return
+	}
 	if !applyEventLogCrossCheck(req, rtmrs, &resp) {
 		verifyFailTotal.Add(1)
 		recordVerifyDuration(time.Since(start))
@@ -287,7 +368,7 @@ func verifyTDX(w http.ResponseWriter, quoteRaw []byte, req *VerifyRequest, start
 
 // verifySGX parses and cryptographically verifies an SGX DCAP Quote v3
 // entirely in Go: ECDSA signatures, attestation key binding, and cert chain.
-func verifySGX(w http.ResponseWriter, quoteRaw []byte, start time.Time) {
+func verifySGX(w http.ResponseWriter, quoteRaw []byte, req *VerifyRequest, start time.Time) {
 	quote, err := ParseSGXQuote(quoteRaw)
 	if err != nil {
 		verifyFailTotal.Add(1)
@@ -332,6 +413,13 @@ func verifySGX(w http.ResponseWriter, quoteRaw []byte, start time.Time) {
 		ISVProdID: &prodID,
 		ISVSVN:    &svn,
 		Message:   "SGX DCAP Quote v3 verified (signature + attestation key binding + certificate chain pinned to Intel SGX Root CA + non-debug)",
+	}
+	identity, ierr := platformIdentityFromChain(quote.QECertData)
+	if !applyPlatformPolicy(req, identity, ierr, &resp) || !applyRevocationPolicy(quote.QECertData, &resp) {
+		verifyFailTotal.Add(1)
+		recordVerifyDuration(time.Since(start))
+		sendJSON(w, 200, resp)
+		return
 	}
 
 	// SGX_TCB_MODE report/enforce: derive the platform TCB status from Intel PCS
@@ -425,6 +513,25 @@ func verifyTDXGPU(w http.ResponseWriter, tdxQuoteRaw []byte, req *VerifyRequest,
 
 	mrtd, rtmrs, rtmrHex := tdxMeasurements(quote)
 
+	// 1a. Platform identity, the request's allow-list, and PCK revocation.
+	identity, ierr := tdxPlatformIdentity(quote)
+	var platformResp VerifyResponse
+	if !applyPlatformPolicy(req, identity, ierr, &platformResp) || !applyRevocationPolicy(tdxPckChain(quote), &platformResp) {
+		verifyFailTotal.Add(1)
+		recordVerifyDuration(time.Since(start))
+		sendJSON(w, 200, VerifyResponse{
+			Success:              false,
+			Status:               platformResp.Status,
+			TeeType:              "tdx-gpu",
+			MRTD:                 mrtd,
+			RTMRs:                rtmrHex,
+			Platform:             identity,
+			PckRevocationChecked: platformResp.PckRevocationChecked,
+			Error:                platformResp.Error,
+		})
+		return
+	}
+
 	// 1b. Cross-check the CC event log against the quote's RTMRs.
 	var elResp VerifyResponse
 	if !applyEventLogCrossCheck(req, rtmrs, &elResp) {
@@ -489,8 +596,10 @@ func verifyTDXGPU(w http.ResponseWriter, tdxQuoteRaw []byte, req *VerifyRequest,
 		RTMRs:            rtmrHex,
 		EventLogVerified: elResp.EventLogVerified,
 		EventLog:         elResp.EventLog,
-		GPUAttestation:   gpuResult,
-		Message:          msg,
+		GPUAttestation:       gpuResult,
+		Platform:             identity,
+		PckRevocationChecked: platformResp.PckRevocationChecked,
+		Message:              msg,
 	})
 }
 

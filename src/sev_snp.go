@@ -17,7 +17,7 @@ import (
 // followed by a GUID certificate table). When certificates are present
 // they are used directly; otherwise the VCEK is fetched from the AMD
 // Key Distribution Service (KDS).
-func verifySEVSNP(w http.ResponseWriter, data []byte, start time.Time) {
+func verifySEVSNP(w http.ResponseWriter, data []byte, req *VerifyRequest, start time.Time) {
 	if len(data) < sevabi.ReportSize {
 		verifyFailTotal.Add(1)
 		sendJSON(w, 400, VerifyResponse{
@@ -51,9 +51,7 @@ func verifySEVSNP(w http.ResponseWriter, data []byte, start time.Time) {
 		return
 	}
 
-	verifySuccessTotal.Add(1)
-	recordVerifyDuration(time.Since(start))
-	sendJSON(w, 200, VerifyResponse{
+	resp := VerifyResponse{
 		Success:     true,
 		Status:      "OK",
 		TeeType:     "sev-snp",
@@ -61,7 +59,18 @@ func verifySEVSNP(w http.ResponseWriter, data []byte, start time.Time) {
 		HostData:    hex.EncodeToString(report.HostData),
 		ReportID:    hex.EncodeToString(report.ReportId),
 		Message:     "SEV-SNP report verified (signature + certificate chain)",
-	})
+	}
+	// The die's CHIP_ID identifies the platform (allow-list, platform.go).
+	identity := &PlatformIdentity{ChipID: hex.EncodeToString(report.ChipId)}
+	if !applyPlatformPolicy(req, identity, nil, &resp) {
+		verifyFailTotal.Add(1)
+		recordVerifyDuration(time.Since(start))
+		sendJSON(w, 200, resp)
+		return
+	}
+	verifySuccessTotal.Add(1)
+	recordVerifyDuration(time.Since(start))
+	sendJSON(w, 200, resp)
 }
 
 // verifySEVSNPSignature verifies the SEV-SNP report cryptographically.
