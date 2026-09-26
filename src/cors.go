@@ -5,52 +5,33 @@ import (
 	"strings"
 )
 
-// allowedOriginSuffixes is the list of host suffixes (with leading
-// dot) plus exact hosts that may issue cross-origin requests against
-// the attestation server. We deliberately keep this hard-coded so the
-// public deployment can be reasoned about without consulting env vars.
+// originAllowed returns true for any https origin, and for plain http on
+// localhost for development.
 //
-// Adding a new front-end domain? Add it here and ship a new build.
-var allowedOriginSuffixes = []string{
-	".privasys.org",
-	".privasys.id",
-}
-
-var allowedOriginHosts = []string{
-	"privasys.org",
-	"privasys.id",
-	// Local development - safe because the OIDC bearer-token check
-	// still gates every non-public endpoint.
-	"localhost",
-	"127.0.0.1",
-}
-
-// originAllowed returns true when the supplied Origin header matches
-// one of the configured suffixes / hosts. Comparison ignores the
-// scheme and port (browsers always include both in Origin).
+// The list used to be hard-coded to Privasys front ends. It protected
+// nothing: every endpoint that is not public is gated by an OIDC bearer
+// token the caller must present in the Authorization header, and the
+// server sets no cookies, so a browser holds no ambient credential here
+// for a foreign page to ride. What the list did do was refuse the pages
+// the platform serves under an adopter's own domain (an app's UI behind a
+// custom hostname), whose attestation panel then could not verify a quote.
 func originAllowed(origin string) bool {
 	if origin == "" {
 		return false
 	}
-	// Strip scheme.
-	host := origin
-	if i := strings.Index(host, "://"); i >= 0 {
-		host = host[i+3:]
+	scheme, host, ok := strings.Cut(origin, "://")
+	if !ok || host == "" {
+		return false
 	}
-	// Strip port.
-	if i := strings.Index(host, ":"); i >= 0 {
+	if i := strings.LastIndex(host, ":"); i >= 0 {
 		host = host[:i]
 	}
 	host = strings.ToLower(host)
-	for _, h := range allowedOriginHosts {
-		if host == h {
-			return true
-		}
-	}
-	for _, s := range allowedOriginSuffixes {
-		if strings.HasSuffix(host, s) {
-			return true
-		}
+	switch strings.ToLower(scheme) {
+	case "https":
+		return true
+	case "http":
+		return host == "localhost" || host == "127.0.0.1"
 	}
 	return false
 }
