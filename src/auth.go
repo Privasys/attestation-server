@@ -55,9 +55,23 @@ type OIDCVerifier struct {
 
 // issuerState holds the JWKS cache for a single issuer.
 type issuerState struct {
+	jwksMu sync.Mutex
 	jwks   *jwksCache
-	jwksMu sync.RWMutex
+	// lastAttempt is when the JWKS was last fetched, successfully or not;
+	// refetches are at least jwksRefetchInterval apart.
+	lastAttempt time.Time
+	// inflight is closed when the fetch in progress ends (nil when none),
+	// so concurrent misses share one fetch.
+	inflight chan struct{}
 }
+
+const (
+	// jwksMaxAge is how long a fetched JWKS is trusted without a refetch.
+	jwksMaxAge = 5 * time.Minute
+	// jwksRefetchInterval spaces refetches of one issuer's JWKS, so tokens
+	// naming unknown key ids cannot drive discovery and JWKS traffic.
+	jwksRefetchInterval = 30 * time.Second
+)
 
 // NewOIDCVerifier creates a verifier for the given OIDC configuration.
 func NewOIDCVerifier(cfg *OIDCConfig) (*OIDCVerifier, error) {
@@ -288,48 +302,78 @@ type oidcDiscovery struct {
 	JwksURI string `json:"jwks_uri"`
 }
 
+// getSigningKeyForIssuer returns the issuer's key for kid (or, with no kid,
+// one matching alg) from the cached JWKS. A miss or a cache older than
+// jwksMaxAge refetches the JWKS, at most once per jwksRefetchInterval per
+// issuer whatever the outcome; concurrent callers share the fetch, which
+// runs without holding the lock.
 func (v *OIDCVerifier) getSigningKeyForIssuer(s *issuerState, issuer, kid, alg string) (*jwkKey, error) {
-	s.jwksMu.RLock()
-	if s.jwks != nil && time.Since(s.jwks.fetchedAt) < 5*time.Minute {
-		if key, ok := s.jwks.keys[kid]; ok {
-			s.jwksMu.RUnlock()
-			return key, nil
+	var fetchErr error
+	for waited := false; ; waited = true {
+		s.jwksMu.Lock()
+		fresh := s.jwks != nil && time.Since(s.jwks.fetchedAt) < jwksMaxAge
+		if fresh {
+			if key := s.jwks.lookup(kid, alg); key != nil {
+				s.jwksMu.Unlock()
+				return key, nil
+			}
+		}
+		if ch := s.inflight; ch != nil && !waited {
+			// Another caller is fetching: wait for it, then look again.
+			s.jwksMu.Unlock()
+			<-ch
+			continue
+		}
+		if waited || time.Since(s.lastAttempt) < jwksRefetchInterval {
+			s.jwksMu.Unlock()
+			if fetchErr != nil {
+				return nil, fetchErr
+			}
+			if !fresh {
+				return nil, errors.New("JWKS unavailable (refetch deferred)")
+			}
+			return nil, fmt.Errorf("key %q not found in JWKS", kid)
+		}
+		ch := make(chan struct{})
+		s.inflight = ch
+		s.lastAttempt = time.Now()
+		s.jwksMu.Unlock()
+
+		keys, err := v.loadJWKS(issuer)
+
+		s.jwksMu.Lock()
+		if err == nil {
+			s.jwks = &jwksCache{keys: keys, fetchedAt: time.Now()}
+		}
+		s.inflight = nil
+		close(ch)
+		s.jwksMu.Unlock()
+		fetchErr = err
+	}
+}
+
+// lookup returns the key for kid, or with no kid the first key matching alg.
+func (c *jwksCache) lookup(kid, alg string) *jwkKey {
+	if key, ok := c.keys[kid]; ok {
+		return key
+	}
+	if kid == "" {
+		for _, k := range c.keys {
+			if k.Alg == alg || (k.Use == "sig" && k.Alg == "") {
+				return k
+			}
 		}
 	}
-	s.jwksMu.RUnlock()
+	return nil
+}
 
-	s.jwksMu.Lock()
-	defer s.jwksMu.Unlock()
-
-	// Double-check after acquiring write lock.
-	if s.jwks != nil && time.Since(s.jwks.fetchedAt) < 5*time.Minute {
-		if key, ok := s.jwks.keys[kid]; ok {
-			return key, nil
-		}
-	}
-
+// loadJWKS discovers and fetches the issuer's JWKS.
+func (v *OIDCVerifier) loadJWKS(issuer string) (map[string]*jwkKey, error) {
 	jwksURI, err := v.discoverJWKS(issuer)
 	if err != nil {
 		return nil, err
 	}
-	keys, err := v.fetchJWKS(jwksURI)
-	if err != nil {
-		return nil, err
-	}
-	s.jwks = &jwksCache{keys: keys, fetchedAt: time.Now()}
-
-	if key, ok := keys[kid]; ok {
-		return key, nil
-	}
-	// If kid is empty, find matching alg.
-	if kid == "" {
-		for _, k := range keys {
-			if k.Alg == alg || (k.Use == "sig" && k.Alg == "") {
-				return k, nil
-			}
-		}
-	}
-	return nil, fmt.Errorf("key %q not found in JWKS", kid)
+	return v.fetchJWKS(jwksURI)
 }
 
 func (v *OIDCVerifier) discoverJWKS(issuer string) (string, error) {

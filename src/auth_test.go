@@ -90,3 +90,74 @@ func TestAuthenticateRequiresExpiry(t *testing.T) {
 		t.Fatalf("expired token: err = %v, want a refusal", err)
 	}
 }
+
+func TestUnknownKidRefetchIsThrottled(t *testing.T) {
+	idp := newTestIdP(t)
+	v := idp.verifier(t)
+	exp := time.Now().Add(time.Hour).Unix()
+
+	if _, err := v.Authenticate(idp.token(t, idp.kid, map[string]any{"exp": exp})); err != nil {
+		t.Fatalf("valid token refused: %v", err)
+	}
+	if n := idp.jwksFetch.Load(); n != 1 {
+		t.Fatalf("JWKS fetched %d times, want 1", n)
+	}
+	// Inside the interval after that fetch, unknown key ids refetch nothing.
+	for i := 0; i < 10; i++ {
+		if _, err := v.Authenticate(idp.token(t, "unknown", map[string]any{"exp": exp})); err == nil {
+			t.Fatal("unknown kid accepted")
+		}
+	}
+	if n := idp.jwksFetch.Load(); n != 1 {
+		t.Fatalf("JWKS fetched %d times, want 1", n)
+	}
+
+	// Once the interval has passed, a burst of misses, sequential and
+	// concurrent, refetches once.
+	st := v.getIssuerState(idp.srv.URL)
+	st.jwksMu.Lock()
+	st.lastAttempt = time.Now().Add(-jwksRefetchInterval)
+	st.jwksMu.Unlock()
+	done := make(chan struct{})
+	for i := 0; i < 20; i++ {
+		go func() {
+			defer func() { done <- struct{}{} }()
+			v.Authenticate(idp.token(t, "unknown-2", map[string]any{"exp": exp}))
+		}()
+	}
+	for i := 0; i < 20; i++ {
+		<-done
+	}
+	for i := 0; i < 10; i++ {
+		v.Authenticate(idp.token(t, "unknown-3", map[string]any{"exp": exp}))
+	}
+	if n := idp.jwksFetch.Load(); n != 2 {
+		t.Fatalf("JWKS fetched %d times, want 2", n)
+	}
+	// The known key still verifies from the cache meanwhile.
+	if _, err := v.Authenticate(idp.token(t, idp.kid, map[string]any{"exp": exp})); err != nil {
+		t.Fatalf("valid token refused during throttle: %v", err)
+	}
+}
+
+func TestConcurrentFirstFetchIsShared(t *testing.T) {
+	idp := newTestIdP(t)
+	v := idp.verifier(t)
+	exp := time.Now().Add(time.Hour).Unix()
+	tok := idp.token(t, idp.kid, map[string]any{"exp": exp})
+	errs := make(chan error, 20)
+	for i := 0; i < 20; i++ {
+		go func() {
+			_, err := v.Authenticate(tok)
+			errs <- err
+		}()
+	}
+	for i := 0; i < 20; i++ {
+		if err := <-errs; err != nil {
+			t.Fatalf("valid token refused: %v", err)
+		}
+	}
+	if n := idp.jwksFetch.Load(); n != 1 {
+		t.Fatalf("JWKS fetched %d times, want 1", n)
+	}
+}
