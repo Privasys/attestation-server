@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -17,6 +18,10 @@ import (
 // ---------------------------------------------------------------------------
 //  Quote verification
 // ---------------------------------------------------------------------------
+
+// maxVerifyBody bounds a verification request body. Real requests (a quote, GPU
+// evidence, a CC event log of tens of KiB, all base64) are well inside it.
+const maxVerifyBody = 1 << 20
 
 // VerifyRequest is the expected JSON body for POST /api/verify.
 type VerifyRequest struct {
@@ -216,7 +221,12 @@ func verifyHandler(w http.ResponseWriter, r *http.Request) {
 
 	// 1. Parse JSON body
 	var req VerifyRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxVerifyBody)).Decode(&req); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			sendJSON(w, http.StatusRequestEntityTooLarge, VerifyResponse{Success: false, Error: "Request body too large"})
+			return
+		}
 		sendJSON(w, 400, VerifyResponse{Success: false, Error: "Invalid JSON body"})
 		return
 	}
@@ -589,13 +599,13 @@ func verifyTDXGPU(w http.ResponseWriter, tdxQuoteRaw []byte, req *VerifyRequest,
 	}
 	recordVerifyDuration(time.Since(start))
 	sendJSON(w, 200, VerifyResponse{
-		Success:          overallSuccess,
-		Status:           status,
-		TeeType:          "tdx-gpu",
-		MRTD:             mrtd,
-		RTMRs:            rtmrHex,
-		EventLogVerified: elResp.EventLogVerified,
-		EventLog:         elResp.EventLog,
+		Success:              overallSuccess,
+		Status:               status,
+		TeeType:              "tdx-gpu",
+		MRTD:                 mrtd,
+		RTMRs:                rtmrHex,
+		EventLogVerified:     elResp.EventLogVerified,
+		EventLog:             elResp.EventLog,
 		GPUAttestation:       gpuResult,
 		Platform:             identity,
 		PckRevocationChecked: platformResp.PckRevocationChecked,

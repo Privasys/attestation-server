@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 )
 
 func main() {
@@ -78,7 +79,14 @@ func main() {
 		"client_role", *oidcClientRole,
 		"listen", *listen,
 	)
-	logFatal("http server exited", "error", http.ListenAndServe(*listen, withCORS(mux)))
+	srv := &http.Server{
+		Addr:              *listen,
+		Handler:           withCORS(mux),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+	logFatal("http server exited", "error", srv.ListenAndServe())
 }
 
 func envOrDefault(key, fallback string) string {
