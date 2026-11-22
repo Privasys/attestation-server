@@ -139,11 +139,13 @@ func (v *OIDCVerifier) Authenticate(tokenStr string) (subject string, err error)
 		return "", fmt.Errorf("audience missing %v", v.cfg.Audiences)
 	}
 
-	// Validate expiry.
-	if exp, ok := claims["exp"].(float64); ok {
-		if time.Now().Unix() > int64(exp) {
-			return "", errors.New("token expired")
-		}
+	// Validate expiry: a token must carry one.
+	exp, ok := claims["exp"].(float64)
+	if !ok {
+		return "", errors.New("token has no expiry")
+	}
+	if time.Now().Unix() > int64(exp) {
+		return "", errors.New("token expired")
 	}
 
 	// Check role (only if a role is configured).
