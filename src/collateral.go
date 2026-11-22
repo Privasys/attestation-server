@@ -52,6 +52,19 @@ var tcbGraceWindow = func() time.Duration {
 	return 24 * time.Hour
 }()
 
+// tcbCacheTTL is how long a fetched PCS response is served from the cache without
+// asking PCS again (SGX_TCB_CACHE_TTL_MINUTES, default 60). Past it, the next verify
+// refetches; if PCS is then unreachable, the cached response is still served up to
+// tcbGraceWindow after it was fetched. 0 refetches on every verify.
+var tcbCacheTTL = func() time.Duration {
+	if v := os.Getenv("SGX_TCB_CACHE_TTL_MINUTES"); v != "" {
+		if m, err := strconv.Atoi(v); err == nil && m >= 0 {
+			return time.Duration(m) * time.Minute
+		}
+	}
+	return time.Hour
+}()
+
 // collateralGetter is the process-wide caching PCS getter, initialised once.
 var (
 	collateralGetterOnce sync.Once
@@ -60,8 +73,8 @@ var (
 
 // collateralFetchTimeout bounds a single PCS fetch on the verify path. It is kept
 // short (the SGX verify path is on the RA-TLS handshake critical path) so a hung PCS
-// on a cache miss adds at most this much latency; the 24h cache makes the steady state
-// a fast cache hit. Overridable via SGX_TCB_FETCH_TIMEOUT_SECONDS.
+// on a cache miss adds at most this much latency; the cache (tcbCacheTTL) makes the
+// steady state a fast cache hit. Overridable via SGX_TCB_FETCH_TIMEOUT_SECONDS.
 var collateralFetchTimeout = func() time.Duration {
 	if v := os.Getenv("SGX_TCB_FETCH_TIMEOUT_SECONDS"); v != "" {
 		if s, err := strconv.Atoi(v); err == nil && s > 0 {
@@ -73,7 +86,7 @@ var collateralFetchTimeout = func() time.Duration {
 
 func getCollateralGetter() httpsGetter {
 	collateralGetterOnce.Do(func() {
-		collateralGetter = newCachingGetter(newNetGetter(collateralFetchTimeout), tcbGraceWindow)
+		collateralGetter = newCachingGetter(newNetGetter(collateralFetchTimeout), tcbCacheTTL, tcbGraceWindow)
 	})
 	return collateralGetter
 }
@@ -190,21 +203,24 @@ type cacheEntry struct {
 	fetchedAt time.Time
 }
 
-// cachingGetter wraps a base getter, caching successful responses and serving them
-// during a PCS outage up to graceWindow past the last successful fetch. This is the
+// cachingGetter wraps a base getter, caching successful responses. A response younger
+// than ttl is served without asking PCS; an older one is refetched, and during a PCS
+// outage served up to graceWindow past the last successful fetch. This is the
 // "cache + bounded grace" posture (option A): strict fail-closed == graceWindow 0.
 // It fails closed only when there is no cache OR the grace has expired.
 type cachingGetter struct {
 	base        httpsGetter
+	ttl         time.Duration
 	graceWindow time.Duration
 	now         func() time.Time
 	mu          sync.Mutex
 	cache       map[string]cacheEntry
 }
 
-func newCachingGetter(base httpsGetter, grace time.Duration) *cachingGetter {
+func newCachingGetter(base httpsGetter, ttl, grace time.Duration) *cachingGetter {
 	return &cachingGetter{
 		base:        base,
+		ttl:         ttl,
 		graceWindow: grace,
 		now:         time.Now,
 		cache:       make(map[string]cacheEntry),
@@ -212,6 +228,13 @@ func newCachingGetter(base httpsGetter, grace time.Duration) *cachingGetter {
 }
 
 func (c *cachingGetter) Get(u string) (map[string][]string, []byte, error) {
+	c.mu.Lock()
+	ent, ok := c.cache[u]
+	c.mu.Unlock()
+	if ok && c.now().Sub(ent.fetchedAt) < c.ttl {
+		return ent.header, ent.body, nil
+	}
+
 	header, body, err := c.base.Get(u)
 	if err == nil {
 		c.mu.Lock()
@@ -221,9 +244,6 @@ func (c *cachingGetter) Get(u string) (map[string][]string, []byte, error) {
 	}
 
 	// PCS unreachable/error: serve cached collateral if within the grace window.
-	c.mu.Lock()
-	ent, ok := c.cache[u]
-	c.mu.Unlock()
 	if ok && c.now().Sub(ent.fetchedAt) <= c.graceWindow {
 		return ent.header, ent.body, nil
 	}

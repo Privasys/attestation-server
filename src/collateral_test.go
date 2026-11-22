@@ -34,7 +34,7 @@ func (m *mockGetter) Get(string) (map[string][]string, []byte, error) {
 func TestCachingGetter_GraceWindow(t *testing.T) {
 	base := &mockGetter{header: map[string][]string{"X": {"v"}}, body: []byte("collateral")}
 	clock := time.Unix(1_700_000_000, 0)
-	c := newCachingGetter(base, 24*time.Hour)
+	c := newCachingGetter(base, time.Hour, 24*time.Hour)
 	c.now = func() time.Time { return clock }
 
 	// First fetch succeeds and populates the cache.
@@ -59,7 +59,7 @@ func TestCachingGetter_GraceWindow(t *testing.T) {
 func TestCachingGetter_StrictFailClosed(t *testing.T) {
 	base := &mockGetter{body: []byte("x")}
 	clock := time.Unix(1_700_000_000, 0)
-	c := newCachingGetter(base, 0) // grace 0 == strict fail-closed
+	c := newCachingGetter(base, 0, 0) // no cache TTL, grace 0 == strict fail-closed
 	c.now = func() time.Time { return clock }
 	if _, _, err := c.Get("u"); err != nil {
 		t.Fatalf("first fetch: %v", err)
@@ -88,5 +88,42 @@ func TestVerifyIssuerChain_RejectsForeignRoot(t *testing.T) {
 
 	if err := verifyIssuerChain(foreign, foreign); err == nil {
 		t.Fatal("verifyIssuerChain accepted a foreign (non-pinned) root")
+	}
+}
+
+func TestCachingGetter_ServesFreshCacheWithoutFetching(t *testing.T) {
+	base := &mockGetter{header: map[string][]string{"X": {"v"}}, body: []byte("collateral")}
+	clock := time.Unix(1_700_000_000, 0)
+	c := newCachingGetter(base, time.Hour, 24*time.Hour)
+	c.now = func() time.Time { return clock }
+
+	for i := 0; i < 5; i++ {
+		if _, body, err := c.Get("u"); err != nil || string(body) != "collateral" {
+			t.Fatalf("get %d: body=%q err=%v", i, body, err)
+		}
+		clock = clock.Add(10 * time.Minute)
+	}
+	if base.calls != 1 {
+		t.Fatalf("PCS called %d times within the TTL, want 1", base.calls)
+	}
+
+	// Past the TTL the entry is refetched.
+	clock = clock.Add(time.Hour)
+	base.body = []byte("collateral-2")
+	if _, body, err := c.Get("u"); err != nil || string(body) != "collateral-2" {
+		t.Fatalf("stale entry not refetched: body=%q err=%v", body, err)
+	}
+	if base.calls != 2 {
+		t.Fatalf("PCS called %d times, want 2", base.calls)
+	}
+
+	// A stale entry is still the fallback through an outage, within grace.
+	clock = clock.Add(2 * time.Hour)
+	base.failing = true
+	if _, body, err := c.Get("u"); err != nil || string(body) != "collateral-2" {
+		t.Fatalf("outage within grace: body=%q err=%v", body, err)
+	}
+	if base.calls != 3 {
+		t.Fatalf("PCS called %d times, want 3 (stale entry retried first)", base.calls)
 	}
 }

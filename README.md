@@ -150,7 +150,9 @@ a CRL that cannot be obtained or has expired, fails the verification
 (`PCK_REVOCATION_MODE=enforce`, the default); `report` only records the
 outcome in `pckRevocationChecked` and logs it; `off` skips the check. CRLs are
 served through the same caching PCS getter as the TCB collateral, with the
-24-hour grace window (`SGX_TCB_GRACE_HOURS`) through a PCS outage. This check
+24-hour grace window (`SGX_TCB_GRACE_HOURS`) through a PCS outage. A cached
+response is reused without asking PCS for an hour (`SGX_TCB_CACHE_TTL_MINUTES`,
+`0` asks on every verification), so a revocation is seen within that time. This check
 is independent of the TCB-status policy (`SGX_TCB_MODE`).
 
 ### Platform allow-list

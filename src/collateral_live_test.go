@@ -50,7 +50,7 @@ func TestLiveSGXCollateral(t *testing.T) {
 	}
 	t.Logf("FMSPC=%s PCESVN=%d CA-CN=%q", ext.FMSPC, ext.TCB.PCESvn, certs[1].Subject.CommonName)
 
-	getter := newCachingGetter(newNetGetter(15*time.Second), 24*time.Hour)
+	getter := newCachingGetter(newNetGetter(15*time.Second), time.Hour, 24*time.Hour)
 
 	// --- TCB info + status derivation ---
 	tcbInfo, err := fetchSGXTcbInfo(ext.FMSPC, getter)
