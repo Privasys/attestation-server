@@ -96,12 +96,18 @@ when verifying quotes against authenticated attestation servers.
 ## JWKS caching
 
 The server caches JWKS keys for 5 minutes per issuer. On first request
-(or after cache expiry), it performs OIDC discovery:
+(or after cache expiry, or for a token naming an unknown key id), it
+performs OIDC discovery:
 
 1. `GET <issuer>/.well-known/openid-configuration` → extracts `jwks_uri`
 2. `GET <jwks_uri>` → fetches signing keys
 
-Both requests have a 10-second timeout.
+Both requests have a 10-second timeout. An issuer's JWKS is refetched at
+most once every 30 seconds, whether the last attempt succeeded or not, and
+concurrent requests share one fetch.
+
+Every token must carry an `exp` claim. A token without one is refused, as an
+expired one is.
 
 ## Multi-issuer support
 

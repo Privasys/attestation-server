@@ -108,7 +108,12 @@ See [docs/authentication.md](docs/authentication.md) for the full OIDC setup gui
 
 Callers must present a valid OIDC bearer token with the
 `attestation-server:client` role. Tokens are issued by your OIDC provider
-(e.g. Privasys ID, Keycloak, Auth0).
+(e.g. Privasys ID, Keycloak, Auth0). A token must carry an `exp` claim: one
+without it is refused, as an expired one is.
+
+A verification request body is limited to 1 MiB (larger bodies get `413`).
+Connections have a 10 s header read timeout, a 30 s read timeout and a
+120 s idle timeout.
 
 ## Verify a quote
 
